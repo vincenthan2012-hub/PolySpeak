@@ -1,0 +1,7 @@
+{
+  "name": "PolySpeak - Structural Speaking Coach",
+  "description": "A comprehensive language learning tool that provides structural scaffolds, graphic organizers, and AI-driven feedback on pronunciation and grammar.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}

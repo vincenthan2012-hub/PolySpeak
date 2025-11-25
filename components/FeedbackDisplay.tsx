@@ -1,0 +1,140 @@
+import React from 'react';
+import { AnalysisResult, FeedbackItem } from '../types';
+import { CheckCircle, AlertTriangle, BookmarkPlus, Award } from 'lucide-react';
+
+interface Props {
+  result: AnalysisResult;
+  onSaveFeedback: (item: FeedbackItem) => void;
+  savedFeedbackIds: Set<string>;
+}
+
+const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbackIds }) => {
+  return (
+    <div className="space-y-8">
+      {/* Summary Section */}
+      <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-200">
+        <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <CheckCircle className="w-5 h-5 text-green-500" />
+          Improvement Summary
+        </h3>
+        
+        <div className="grid gap-6 md:grid-cols-2">
+          <div>
+            <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wide mb-2">Your Transcription</h4>
+            <p className="text-slate-600 leading-relaxed italic">"{result.transcription}"</p>
+          </div>
+          <div>
+            <h4 className="text-xs font-bold text-green-600 uppercase tracking-wide mb-2">Improved Version</h4>
+            <p className="text-slate-800 font-medium leading-relaxed">{result.improvedText}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Overall Feedback */}
+      {result.overallFeedback && (
+        <div>
+          <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+            <Award className="w-5 h-5 text-blue-500" />
+            Overall Feedback (IELTS Criteria)
+          </h3>
+          
+          <div className="space-y-4">
+            <div className="bg-white p-5 rounded-xl shadow-sm border border-slate-200">
+              <div className="space-y-4">
+                <div>
+                  <h4 className="text-sm font-bold text-blue-700 mb-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-blue-500"></div>
+                    Task Response
+                  </h4>
+                  <p className="text-slate-700 leading-relaxed pl-4">{result.overallFeedback.taskResponse}</p>
+                </div>
+                
+                <div>
+                  <h4 className="text-sm font-bold text-indigo-700 mb-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-indigo-500"></div>
+                    Coherence
+                  </h4>
+                  <p className="text-slate-700 leading-relaxed pl-4">{result.overallFeedback.coherence}</p>
+                </div>
+                
+                <div>
+                  <h4 className="text-sm font-bold text-purple-700 mb-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-purple-500"></div>
+                    Cohesion
+                  </h4>
+                  <p className="text-slate-700 leading-relaxed pl-4">{result.overallFeedback.cohesion}</p>
+                </div>
+                
+                <div>
+                  <h4 className="text-sm font-bold text-pink-700 mb-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-pink-500"></div>
+                    Vocabulary
+                  </h4>
+                  <p className="text-slate-700 leading-relaxed pl-4">{result.overallFeedback.vocabulary}</p>
+                </div>
+                
+                <div>
+                  <h4 className="text-sm font-bold text-rose-700 mb-2 flex items-center gap-2">
+                    <div className="w-2 h-2 rounded-full bg-rose-500"></div>
+                    Grammar
+                  </h4>
+                  <p className="text-slate-700 leading-relaxed pl-4">{result.overallFeedback.grammar}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Detailed Feedback */}
+      <div>
+        <h3 className="text-lg font-bold text-slate-800 mb-4 flex items-center gap-2">
+          <AlertTriangle className="w-5 h-5 text-orange-500" />
+          Sentence-by-Sentence Feedback
+        </h3>
+        
+        <div className="space-y-4">
+          {result.feedback.length === 0 ? (
+            <div className="p-4 bg-green-50 text-green-800 rounded-lg text-center">
+              Great job! No specific errors found.
+            </div>
+          ) : (
+            result.feedback.map((item) => {
+              const isSaved = savedFeedbackIds.has(item.id);
+              return (
+                <div key={item.id} className="bg-white p-5 rounded-xl shadow-sm border border-slate-200 hover:border-orange-200 transition-colors">
+                  <div className="flex justify-between items-start mb-3">
+                    <div className="space-y-1 flex-1">
+                       <div className="flex items-start gap-2">
+                         <span className="bg-red-100 text-red-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-1">ORIGINAL</span>
+                         <p className="text-slate-600 line-through decoration-red-300">{item.original}</p>
+                       </div>
+                       <div className="flex items-start gap-2">
+                         <span className="bg-green-100 text-green-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-1">BETTER</span>
+                         <p className="text-slate-800 font-medium">{item.improved}</p>
+                       </div>
+                    </div>
+                    <button
+                      onClick={() => onSaveFeedback(item)}
+                      className={`ml-4 p-2 rounded-full transition-colors ${isSaved ? 'bg-orange-100 text-orange-600' : 'text-slate-300 hover:bg-slate-50 hover:text-slate-500'}`}
+                      title="Save for review"
+                    >
+                      <BookmarkPlus className={`w-5 h-5 ${isSaved ? 'fill-current' : ''}`} />
+                    </button>
+                  </div>
+                  
+                  <div className="mt-3 pt-3 border-t border-slate-100 text-sm text-slate-600 flex gap-2">
+                    <span className="font-semibold text-orange-600 shrink-0">Tutor:</span>
+                    {item.explanation}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default FeedbackDisplay;
