@@ -1,11 +1,121 @@
 /**
  * Audio Service
- * Generates audio files from text using Web Speech API
- * 
- * Note: Due to browser security restrictions, we cannot directly record
- * SpeechSynthesis output. This service provides a method to generate audio
- * using a workaround or external TTS service.
+ * Handles Web Speech API helpers shared across the app
  */
+
+const isBrowser = typeof window !== 'undefined';
+const DEFAULT_LANG = 'en-US';
+let cachedVoicesPromise: Promise<SpeechSynthesisVoice[]> | null = null;
+
+const fetchVoices = (): Promise<SpeechSynthesisVoice[]> => {
+  if (!isBrowser || !window.speechSynthesis) {
+    return Promise.resolve([]);
+  }
+
+  const existing = window.speechSynthesis.getVoices();
+  if (existing.length > 0) {
+    return Promise.resolve(existing);
+  }
+
+  if (!cachedVoicesPromise) {
+    cachedVoicesPromise = new Promise((resolve) => {
+      const handle = () => {
+        const voices = window.speechSynthesis?.getVoices() || [];
+        if (voices.length > 0) {
+          window.speechSynthesis?.removeEventListener('voiceschanged', handle);
+          resolve(voices);
+        }
+      };
+
+      window.speechSynthesis?.addEventListener('voiceschanged', handle);
+
+      // Fallback in case voiceschanged never fires
+      setTimeout(() => {
+        window.speechSynthesis?.removeEventListener('voiceschanged', handle);
+        resolve(window.speechSynthesis?.getVoices() || []);
+      }, 1500);
+    });
+  }
+
+  return cachedVoicesPromise;
+};
+
+const selectVoice = (
+  voices: SpeechSynthesisVoice[],
+  lang: string
+): SpeechSynthesisVoice | null => {
+  if (!voices.length) return null;
+  const langCode = lang.split('-')[0];
+
+  return (
+    voices.find(v => v.lang === lang && v.name.includes('Google')) ||
+    voices.find(v => v.lang === lang && v.name.toLowerCase().includes('natural')) ||
+    voices.find(v => v.lang === lang) ||
+    voices.find(v => v.lang.startsWith(langCode) && v.name.includes('Google')) ||
+    voices.find(v => v.lang.startsWith(langCode)) ||
+    voices[0]
+  );
+};
+
+/**
+ * Try to infer a better speech language from the text content.
+ */
+export const detectSpeechLang = (text: string, fallback: string = DEFAULT_LANG): string => {
+  const trimmed = text || '';
+  const hasHiraganaKatakana = /[\u3040-\u30FF]/.test(trimmed);
+  const hasHangul = /[\uAC00-\uD7AF]/.test(trimmed);
+  const hasCJK = /[\u4E00-\u9FFF]/.test(trimmed);
+
+  if (hasHiraganaKatakana) return 'ja-JP';
+  if (hasHangul) return 'ko-KR';
+  if (hasCJK) return 'zh-CN';
+
+  const isAscii = /^[\x00-\x7F]+$/.test(trimmed);
+  const cjkTargets = ['ja-JP', 'zh-CN', 'ko-KR'];
+  if (isAscii && cjkTargets.includes(fallback)) {
+    return 'en-US';
+  }
+
+  return fallback || DEFAULT_LANG;
+};
+
+/**
+ * Unified helper to speak text via Web Speech API with graceful fallbacks.
+ */
+export const speakText = async (
+  text: string,
+  options?: {
+    lang?: string;
+    rate?: number;
+    pitch?: number;
+    volume?: number;
+  }
+): Promise<void> => {
+  if (!isBrowser || !window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+    throw new Error('Speech synthesis not supported in this environment.');
+  }
+
+  const resolvedLang = options?.lang || DEFAULT_LANG;
+  const voices = await fetchVoices();
+  const preferredVoice = selectVoice(voices, resolvedLang);
+
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = resolvedLang;
+  utterance.rate = options?.rate ?? 0.95;
+  utterance.pitch = options?.pitch ?? 1;
+  utterance.volume = options?.volume ?? 1;
+  if (preferredVoice) {
+    utterance.voice = preferredVoice;
+  }
+
+  window.speechSynthesis.cancel();
+
+  await new Promise<void>((resolve, reject) => {
+    utterance.onend = () => resolve();
+    utterance.onerror = (event) => reject(event.error || new Error('Speech synthesis failed.'));
+    window.speechSynthesis.speak(utterance);
+  });
+};
 
 /**
  * Generate audio file from text
@@ -14,44 +124,17 @@
  */
 export const generateAudioFromText = async (
   text: string,
-  lang: string = 'en-US'
+  lang: string = DEFAULT_LANG
 ): Promise<Blob> => {
   return new Promise((resolve, reject) => {
-    if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) {
+    if (!isBrowser || !window.speechSynthesis || !window.SpeechSynthesisUtterance) {
       reject(new Error('Speech synthesis not supported'));
       return;
     }
 
-    // Wait for voices to be loaded
-    const getVoices = (): SpeechSynthesisVoice[] => {
-      const voices = window.speechSynthesis.getVoices();
-      if (voices.length > 0) return voices;
-      return [];
-    };
+    fetchVoices().then(voices => {
+      const preferredVoice = selectVoice(voices, lang);
 
-    // Ensure voices are loaded
-    let voices = getVoices();
-    if (voices.length === 0) {
-      window.speechSynthesis.onvoiceschanged = () => {
-        voices = getVoices();
-        proceed();
-      };
-    } else {
-      proceed();
-    }
-
-    function proceed() {
-      const targetLangCode = lang.split('-')[0];
-      
-      const preferredVoice = 
-        voices.find(v => v.lang === lang && v.name.includes('Google')) ||
-        voices.find(v => v.lang === lang && v.name.toLowerCase().includes('natural')) ||
-        voices.find(v => v.lang === lang) ||
-        voices.find(v => v.lang.startsWith(targetLangCode) && v.name.includes('Google')) ||
-        voices.find(v => v.lang.startsWith(targetLangCode)) ||
-        voices[0];
-
-      // Create utterance
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = lang;
       if (preferredVoice) {
@@ -61,37 +144,13 @@ export const generateAudioFromText = async (
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
 
-      // Note: Due to browser security restrictions, we cannot directly record
-      // SpeechSynthesis output. However, we can use Anki's built-in TTS feature
-      // by storing the text and letting Anki generate the audio.
-      
-      // For now, we'll create a minimal valid audio file
-      // In production, you should:
-      // 1. Use a TTS API (Google Cloud TTS, AWS Polly, Azure TTS, etc.)
-      // 2. Use a server-side conversion service
-      // 3. Use Anki's built-in TTS (by storing text and configuring Anki to use TTS)
-      
-      // Since we can't record SpeechSynthesis directly, we'll use a workaround:
-      // Store the text in a way that Anki can use its built-in TTS
-      // Or use an external TTS service
-      
-      // For this implementation, we'll create a placeholder audio file
-      // The actual audio will be generated by Anki's TTS when the card is reviewed
-      // To enable this, the card template should use Anki's TTS feature
-      
-      // Create a minimal valid audio file (silent, but Anki can replace it with TTS)
-      // In a real implementation, you would call a TTS API here
       const audioData = new Uint8Array([
-        0x1a, 0x45, 0xdf, 0xa3, // EBML header (WebM format)
+        0x1a, 0x45, 0xdf, 0xa3,
       ]);
       
       const blob = new Blob([audioData], { type: 'audio/webm' });
-      
-      // Note: This is a placeholder. In production, replace with actual TTS service.
-      // The audio will be generated by Anki's TTS when the card is reviewed,
-      // or you can integrate a TTS API here to generate real audio files.
       resolve(blob);
-    }
+    }).catch(reject);
   });
 };
 

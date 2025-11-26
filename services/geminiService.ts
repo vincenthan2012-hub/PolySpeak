@@ -708,3 +708,83 @@ export const generateSampleSpeech = async (
     return "Error generating sample speech.";
   }
 };
+
+export const generateInspirePrompt = async (
+  difficulty: Difficulty,
+  previousPrompts: string[],
+  config: LLMConfig = DEFAULT_CONFIG
+): Promise<string> => {
+  const levelMap: Record<Difficulty, string> = {
+    beginner: 'Beginner (A1-A2)',
+    intermediate: 'Intermediate (B1-B2)',
+    advanced: 'Advanced (C1-C2)'
+  };
+
+  const promptTypes = ['Descriptive', 'Narrative', 'Argumentative', 'Creative'];
+  const trimmedHistory = previousPrompts.filter(p => typeof p === 'string' && p.trim().length > 0);
+  const historyText = trimmedHistory.length
+    ? `Previously generated prompts:\n${trimmedHistory.slice(0, 12).map((p, idx) => `${idx + 1}. ${p}`).join('\n')}\nAvoid repeating or closely paraphrasing these topics.`
+    : 'No previous prompts to avoid for this learner.';
+
+  const request = `
+You are a structural speaking coach.
+
+Learner level: ${levelMap[difficulty]}.
+
+Choose exactly ONE prompt type from this list and reflect it naturally in the topic without naming the type: ${promptTypes.join(', ')}.
+
+${historyText}
+
+Requirements:
+1. Generate ONE prompt only.
+2. The sentence MUST start with exactly one of these stems: "Describe", "Discuss", or "Talk about".
+3. The topic must be specific, age-appropriate, and achievable for ${levelMap[difficulty]} learners.
+4. Encourage variety by using fresh settings, situations, emotions, or perspectives.
+5. Keep output to a single sentence ending with a period. No bullet points, numbering, emojis, or explanations.
+
+Return only the prompt text.`;
+
+  try {
+    let rawResponse = '';
+
+    if (config.provider === 'gemini') {
+      const ai = getGeminiClient(config.apiKey);
+      const result = await ai.models.generateContent({
+        model: config.model || "gemini-2.5-flash",
+        contents: request,
+      });
+      rawResponse = result.text || '';
+    } else {
+      const messages = [
+        { role: "system", content: "You create concise speaking prompts. Output exactly one sentence starting with Describe, Discuss, or Talk about." },
+        { role: "user", content: request }
+      ];
+      rawResponse = await getOpenAICompatibleResponse(config, messages);
+    }
+
+    const cleaned = rawResponse
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean)[0] || '';
+
+    const promptText = cleaned
+      .replace(/^["'`]+/, '')
+      .replace(/["'`]+$/, '')
+      .replace(/^[*-]\s*/, '')
+      .trim();
+
+    if (!promptText) {
+      throw new Error('Empty prompt returned from model.');
+    }
+
+    const stemMatch = /^(Describe|Discuss|Talk about)\b/.test(promptText);
+    if (!stemMatch) {
+      throw new Error(`Invalid prompt format: "${promptText}".`);
+    }
+
+    return promptText.endsWith('.') ? promptText : `${promptText}.`;
+  } catch (error) {
+    console.error('Error generating inspire prompt:', error);
+    throw new Error(`Failed to generate speaking prompt: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};

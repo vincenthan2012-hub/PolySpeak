@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Mic, ChevronDown, Star, Layers, Settings, Languages, X, Sparkles, Server, Key, Globe, Loader2, BookOpen, Volume2 } from 'lucide-react';
-import { generateScaffold, analyzeAudio, generateSampleSpeech } from './services/geminiService';
+import { generateScaffold, analyzeAudio, generateSampleSpeech, generateInspirePrompt } from './services/geminiService';
+import { speakText } from './services/audioService';
 import { GraphicData, Expression, AnalysisResult, SavedItem, FeedbackItem, LANGUAGES, LLMConfig, WhisperConfig, Difficulty } from './types';
 import { getAvailableModels } from './services/whisperService';
 import GraphicOrganizer from './components/GraphicOrganizer';
@@ -22,6 +23,8 @@ const PROVIDERS = [
   { id: 'siliconflow', name: 'SiliconFlow', defaultModel: 'deepseek-ai/DeepSeek-V3', defaultUrl: 'https://api.siliconflow.cn/v1' },
   { id: 'ollama', name: 'Ollama (Local)', defaultModel: 'llama3', defaultUrl: 'http://localhost:11434' },
 ];
+
+const MAX_PROMPT_HISTORY = 20;
 
 function App() {
   // State
@@ -106,6 +109,17 @@ function App() {
   const [difficulty, setDifficulty] = useState<Difficulty>('intermediate');
   const [isLoadingScaffold, setIsLoadingScaffold] = useState(false);
   const [scaffoldData, setScaffoldData] = useState<{structure: GraphicData, expressions: Expression[]} | null>(null);
+  const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
+  const [promptHistory, setPromptHistory] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('lingua_prompt_history');
+      if (!saved) return [];
+      const parsed = JSON.parse(saved);
+      return Array.isArray(parsed) ? parsed.filter((item: unknown): item is string => typeof item === 'string') : [];
+    } catch {
+      return [];
+    }
+  });
   
   // Sample Speech State
   const [sampleSpeech, setSampleSpeech] = useState<string | null>(null);
@@ -125,6 +139,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem('lingua_saved', JSON.stringify(savedItems));
   }, [savedItems]);
+
+  useEffect(() => {
+    localStorage.setItem('lingua_prompt_history', JSON.stringify(promptHistory.slice(0, MAX_PROMPT_HISTORY)));
+  }, [promptHistory]);
 
   const savedPhrases = new Set(
     savedItems.filter(i => i.type === 'expression').map(i => (i.data as Expression).id)
@@ -193,6 +211,27 @@ function App() {
         alert(`生成示例失败:\n\n${formatError(e)}`);
     } finally {
         setIsGeneratingSample(false);
+    }
+  };
+
+  const handleInspireMe = async () => {
+    if (isGeneratingPrompt) return;
+    setIsGeneratingPrompt(true);
+    try {
+      const prompt = await generateInspirePrompt(difficulty, promptHistory, llmConfig);
+      const cleanPrompt = prompt.trim();
+      if (cleanPrompt) {
+        setTopic(cleanPrompt);
+        setPromptHistory(prev => {
+          const updated = [cleanPrompt, ...prev.filter(item => item !== cleanPrompt)];
+          return updated.slice(0, MAX_PROMPT_HISTORY);
+        });
+      }
+    } catch (error) {
+      console.error('Error generating inspire prompt:', error);
+      alert(`生成话题失败:\n\n${formatError(error)}`);
+    } finally {
+      setIsGeneratingPrompt(false);
     }
   };
 
@@ -288,29 +327,11 @@ function App() {
   };
 
   const playAudio = (text: string) => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel();
-    
-    // Remove highlighting markers for TTS
+    if (!text) return;
     const cleanText = text.replace(/\*\*/g, '');
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.lang = targetLang;
-    
-    const voices = window.speechSynthesis.getVoices();
-    const targetLangCode = targetLang.split('-')[0];
-    
-    const preferredVoice = 
-      voices.find(v => v.lang === targetLang && v.name.includes('Google')) ||
-      voices.find(v => v.lang === targetLang && v.name.toLowerCase().includes('natural')) ||
-      voices.find(v => v.lang === targetLang) ||
-      voices.find(v => v.lang.startsWith(targetLangCode) && v.name.includes('Google')) ||
-      voices.find(v => v.lang.startsWith(targetLangCode));
-
-    if (preferredVoice) {
-      utterance.voice = preferredVoice;
-    }
-
-    window.speechSynthesis.speak(utterance);
+    speakText(cleanText, { lang: targetLang }).catch((error) => {
+      console.error('Speech synthesis failed:', error);
+    });
   };
 
   const renderHighlightedText = (text: string) => {
@@ -708,7 +729,18 @@ function App() {
                     {/* Responsive Layout Adjustments */}
                     <div className="flex flex-col lg:flex-row gap-6 items-stretch lg:items-end">
                       <div className="flex-1 w-full space-y-3">
-                        <label className="block text-sm font-bold text-slate-700 pl-1">Topic</label>
+                        <div className="flex items-center justify-between">
+                          <label className="block text-sm font-bold text-slate-700 pl-1">Topic</label>
+                          <button
+                            type="button"
+                            onClick={handleInspireMe}
+                            disabled={isGeneratingPrompt}
+                            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl border border-indigo-100 text-indigo-600 bg-indigo-50 hover:bg-white transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                          >
+                            {isGeneratingPrompt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                            Inspire Me
+                          </button>
+                        </div>
                         <input 
                           type="text" 
                           value={topic}

@@ -1,6 +1,7 @@
 import React from 'react';
 import { Star, Info, Volume2 } from 'lucide-react';
 import { Expression } from '../types';
+import { detectSpeechLang, speakText } from '../services/audioService';
 
 interface Props {
   expressions: Expression[];
@@ -10,58 +11,11 @@ interface Props {
 }
 
 const ExpressionList: React.FC<Props> = ({ expressions, favorites, toggleFavorite, targetLang }) => {
-  // 根据文本内容粗略检测语言，用于选择更合适的朗读语言
-  const detectSpeechLang = (text: string): string => {
-    const fallback = targetLang || 'en-US';
-    const hasHiraganaKatakana = /[\u3040-\u30FF]/.test(text); // 日文平假名/片假名
-    const hasHangul = /[\uAC00-\uD7AF]/.test(text); // 韩文
-    const hasCJK = /[\u4E00-\u9FFF]/.test(text); // 中日韩统一表意文字（这里主要当中文用）
-
-    if (hasHiraganaKatakana) return 'ja-JP';
-    if (hasHangul) return 'ko-KR';
-    if (hasCJK) return 'zh-CN';
-
-    // 如果文本几乎全是 ASCII，而当前学习语言是 CJK，则很大概率是英文短语
-    const isAscii = /^[\x00-\x7F]+$/.test(text);
-    const cjkTargets = ['ja-JP', 'zh-CN', 'ko-KR'];
-    if (isAscii && cjkTargets.includes(fallback)) {
-      return 'en-US';
-    }
-
-    // 其它情况退回到当前学习语言
-    return fallback;
-  };
-
   const playAudio = (text: string) => {
-    if (!window.speechSynthesis) return;
-    window.speechSynthesis.cancel(); // Stop previous
-    
-    const utterance = new SpeechSynthesisUtterance(text);
-    const lang = detectSpeechLang(text);
-    utterance.lang = lang;
-    utterance.rate = 0.9; // Slightly slower for learners
-
-    // Attempt to find a better voice (e.g., Google voices often sound more natural)
-    const voices = window.speechSynthesis.getVoices();
-    const langCode = lang.split('-')[0]; // Match 'en' from 'en-US'
-    
-    const preferredVoice = 
-      // 1. Try to match full locale and "Google" (often higher quality)
-      voices.find(v => v.lang === lang && v.name.includes('Google')) ||
-      // 2. Try to match full locale and "Natural" (some systems)
-      voices.find(v => v.lang === lang && v.name.toLowerCase().includes('natural')) ||
-      // 3. Match full locale
-      voices.find(v => v.lang === lang) ||
-      // 4. Match just the language code and "Google"
-      voices.find(v => v.lang.startsWith(langCode) && v.name.includes('Google')) ||
-      // 5. Fallback to any match for language
-      voices.find(v => v.lang.startsWith(langCode));
-
-    if (preferredVoice) {
-      utterance.voice = preferredVoice;
-    }
-
-    window.speechSynthesis.speak(utterance);
+    const lang = detectSpeechLang(text, targetLang);
+    speakText(text, { lang, rate: 0.9 }).catch((error) => {
+      console.error('Speech synthesis failed:', error);
+    });
   };
 
   return (
