@@ -10,6 +10,272 @@ const DEFAULT_CONFIG: LLMConfig = {
   model: 'gemini-2.5-flash'
 };
 
+export const DEFAULT_PROMPT_TEMPLATES = {
+  inspire: `You are a structural speaking coach.
+
+Learner level: {{level}}.
+
+Choose exactly ONE prompt type from this list and reflect it naturally in the topic without naming the type: {{promptTypes}}.
+
+{{history}}
+
+Requirements:
+1. Generate ONE prompt only.
+2. The sentence MUST start with exactly one of these stems: "Describe", "Discuss", or "Talk about".
+3. The topic must be specific, age-appropriate, and achievable for the learner.
+4. Encourage variety by using fresh settings, situations, emotions, or perspectives.
+5. Keep output to a single sentence ending with a period. No bullet points, numbering, emojis, or explanations.
+
+Return only the prompt text.`,
+  liveHint: `You are an encouraging speaking coach helping a learner discuss "{{topic}}" at the {{difficulty}} level.
+The learner paused and needs a quick nudge. Provide either:
+1. A follow-up question to keep them talking, or
+2. A hint that suggests a connector, structure, or expression.
+
+Keep it under 35 words, warm in tone, and output JSON like {"type":"question"|"hint","message":"..."} with double quotes.`,
+  story: `Write a fun, engaging short story (around 150 words) in {{targetLang}} that naturally uses the following expressions: {{phrases}}.
+Wrap each used expression in double asterisks, e.g., **expression**. Keep the story student-friendly and cohesive.`,
+  feedback: `Analyze the following speech transcription from a student practicing "{{targetLang}}".
+
+Transcription: "{{transcription}}"
+The student's native language for explanations is "{{nativeLang}}".
+
+Provide comprehensive feedback following IELTS Speaking criteria:
+1. "transcription": repeat the provided transcription exactly.
+2. "improvedText": a polished version of the entire speech in {{targetLang}}.
+3. "feedback": array of objects { "original", "improved", "explanation" } where explanation is in {{nativeLang}}.
+4. "overallFeedback": object with keys taskResponse, cohesion, coherence, vocabulary, grammar (all in {{nativeLang}}).
+
+Return ONLY valid JSON with those keys. Do not wrap in markdown.`,
+  sample: `Write a natural speech or monologue (about 100-150 words) about "{{topic}}" in "{{targetLang}}".
+You MUST use at least {{minCount}} of the following expressions naturally: {{phrases}}.
+Wrap each expression you use in double asterisks, e.g., **expression**. Keep the tone motivational and learner-friendly.`
+};
+
+const applyPromptTemplate = (template: string, values: Record<string, string>): string => {
+  return template.replace(/\{\{\s*(.+?)\s*\}\}/g, (_, key) => {
+    const replacement = values[key.trim()];
+    return typeof replacement === 'string' ? replacement : '';
+  });
+};
+
+const normalizeSentence = (text: string) => text
+  .toLowerCase()
+  .replace(/[\u2018\u2019]/g, "'")
+  .replace(/[\u201C\u201D]/g, '"')
+  .replace(/[^a-z0-9\s]/gi, ' ')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const stripTimestampArtifacts = (text: string) => {
+  if (!text) return '';
+  return text
+    .replace(/\[(?:\d{1,2}:){1,2}\d{1,2}(?:\.\d{1,3})?\]/g, ' ')
+    .replace(/^\s*\d{1,2}:\d{2}(?:\.\d{1,3})?\s*/gm, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+};
+
+const splitTranscriptionIntoSentences = (transcription: string): string[] => {
+  const cleanText = stripTimestampArtifacts(transcription)
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleanText) return [];
+
+  const matches = cleanText.match(/[^.!?]+[.!?]?/g);
+  if (!matches) return [cleanText];
+
+  return matches
+    .map(sentence => sentence.trim())
+    .filter(Boolean);
+};
+
+const countWords = (text: string) => (text.match(/\b\w+\b/g) || []).length;
+
+const ensureSentenceEnding = (text: string, fallback: string) => {
+  if (!text) return fallback;
+  const trimmed = text.trim();
+  if (!trimmed) return fallback;
+  return /[.!?…"]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+};
+
+const replaceFragmentWithinSentence = (sentence: string, fragment: string, replacement: string) => {
+  if (!sentence || !fragment || !replacement) return sentence;
+  const escaped = fragment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(escaped, 'i');
+  if (!regex.test(sentence)) return sentence;
+  return sentence.replace(regex, replacement.trim());
+};
+
+const isLikelyFullSentence = (text: string, referenceWordCount: number) => {
+  if (!text) return false;
+  const words = countWords(text);
+  if (!words) return false;
+  const ratio = words / Math.max(referenceWordCount, 1);
+  return ratio >= 0.6 && /[.!?…"]$/.test(text.trim());
+};
+
+const computeTokenOverlap = (a: string, b: string) => {
+  if (!a || !b) return 0;
+  const aTokens = new Set(a.split(' ').filter(Boolean));
+  const bTokens = new Set(b.split(' ').filter(Boolean));
+  if (!aTokens.size || !bTokens.size) return 0;
+  let overlap = 0;
+  aTokens.forEach(token => {
+    if (bTokens.has(token)) overlap++;
+  });
+  return overlap / Math.min(aTokens.size, bTokens.size);
+};
+
+const findBestSentenceMatch = (
+  fragmentNormalized: string,
+  sentences: Array<{ original: string; normalized: string }>
+) => {
+  if (!fragmentNormalized) return null;
+
+  const direct = sentences.find(sentence =>
+    sentence.normalized.includes(fragmentNormalized)
+  );
+  if (direct) return direct;
+
+  const reverse = sentences.find(sentence =>
+    fragmentNormalized.includes(sentence.normalized)
+  );
+  if (reverse) return reverse;
+
+  let bestMatch: { original: string; normalized: string } | null = null;
+  let bestScore = 0;
+
+  sentences.forEach(sentence => {
+    const score = computeTokenOverlap(fragmentNormalized, sentence.normalized);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = sentence;
+    }
+  });
+
+  return bestScore >= 0.35 ? bestMatch : null;
+};
+
+const buildImprovedSentence = (
+  resolvedSentence: string,
+  fragmentOriginal: string,
+  fragmentImproved: string
+) => {
+  if (!resolvedSentence) {
+    const fallback = fragmentOriginal || fragmentImproved || '';
+    return ensureSentenceEnding(fragmentImproved || fallback, fallback);
+  }
+  const referenceCount = countWords(resolvedSentence);
+  if (isLikelyFullSentence(fragmentImproved, referenceCount)) {
+    return ensureSentenceEnding(fragmentImproved, resolvedSentence);
+  }
+
+  const rebuilt = replaceFragmentWithinSentence(
+    resolvedSentence,
+    fragmentOriginal,
+    fragmentImproved
+  );
+
+  if (rebuilt !== resolvedSentence) {
+    return ensureSentenceEnding(rebuilt, rebuilt);
+  }
+
+  // Fallback to the original sentence if we can't safely rebuild
+  return ensureSentenceEnding(fragmentImproved || resolvedSentence, resolvedSentence);
+};
+
+const consolidateFeedbackBySentence = (feedbackItems: any[]) => {
+  const grouped = new Map<string, any[]>();
+
+  feedbackItems.forEach(item => {
+    if (!item?.original) return;
+    const key = item.original.trim();
+    if (!key) return;
+    grouped.set(key, [...(grouped.get(key) || []), item]);
+  });
+
+  const selectBestImproved = (items: any[]) => {
+    const unique = Array.from(
+      new Set(
+        items
+          .map(it => (it.improved || '').trim())
+          .filter(Boolean)
+      )
+    );
+    if (!unique.length) return '';
+    return unique.sort((a, b) => countWords(b) - countWords(a))[0];
+  };
+
+  const buildExplanation = (items: any[]) => {
+    const explanations = items
+      .map(it => (it.explanation || '').trim())
+      .filter(Boolean);
+    if (!explanations.length) return '';
+    if (explanations.length === 1) return explanations[0];
+    return explanations
+      .map((text, index) => `${index + 1}. ${text}`)
+      .join('\n');
+  };
+
+  const consolidated: any[] = [];
+  grouped.forEach((items, sentence) => {
+    const bestImproved = selectBestImproved(items) || sentence;
+    consolidated.push({
+      ...items[0],
+      id: crypto.randomUUID(),
+      original: sentence,
+      improved: bestImproved,
+      explanation: buildExplanation(items)
+    });
+  });
+
+  return consolidated;
+};
+
+const mapFragmentsToFullSentences = (feedbackItems: any[], transcription: string) => {
+  if (!transcription) return feedbackItems;
+  const sentences = splitTranscriptionIntoSentences(transcription);
+  if (!sentences.length) return feedbackItems;
+
+  const normalizedSentences = sentences.map(sentence => ({
+    original: sentence,
+    normalized: normalizeSentence(sentence)
+  }));
+
+  const resolvedItems = feedbackItems.map(item => {
+    if (!item) return item;
+    const fragmentOriginal = item.original || '';
+    const fragmentImproved = item.improved || '';
+    const fragmentNormalized = normalizeSentence(fragmentOriginal);
+
+    const match = findBestSentenceMatch(fragmentNormalized, normalizedSentences);
+    if (!match) {
+      const improvedSentence = buildImprovedSentence(fragmentOriginal, fragmentOriginal, fragmentImproved);
+      return {
+        ...item,
+        original: fragmentOriginal.trim(),
+        improved: improvedSentence
+      };
+    }
+
+    const improvedSentence = buildImprovedSentence(
+      match.original,
+      fragmentOriginal,
+      fragmentImproved
+    );
+
+    return {
+      ...item,
+      original: match.original,
+      improved: improvedSentence
+    };
+  }).filter(item => item?.original?.trim());
+
+  return consolidateFeedbackBySentence(resolvedItems);
+};
+
 // Helper to get Gemini Client dynamically
 const getGeminiClient = (apiKey: string) => {
   return new GoogleGenAI({ apiKey: apiKey || process.env.API_KEY });
@@ -168,6 +434,7 @@ export const generateScaffold = async (
   expressionCount: number, 
   targetLang: string, 
   nativeLang: string,
+  expressionLang: string,
   config: LLMConfig = DEFAULT_CONFIG,
   difficulty: Difficulty = 'intermediate'
 ): Promise<{ structure: GraphicData, expressions: Expression[] }> => {
@@ -182,6 +449,12 @@ export const generateScaffold = async (
 - Use EXPLICIT transitions (e.g., "first", "then", "finally")
 - Keep examples SHORT (5-10 words)
 - Use simple sentence structures`,
+    'pre-intermediate': `DIFFICULTY: PRE-INTERMEDIATE
+- Use MOSTLY high-frequency words with a few new terms
+- Provide CLEAR context or definitions for any new phrases
+- Keep sentences between 8-12 words with limited subordinate clauses
+- Encourage connectors such as "because", "so", "while"
+- Examples should model everyday conversations`,
     intermediate: `DIFFICULTY: INTERMEDIATE
 - Use MOSTLY high-frequency words with some variety
 - Include MORE DETAILS in phrases and examples
@@ -189,6 +462,12 @@ export const generateScaffold = async (
 - Use VARIED CONNECTORS (e.g., "however", "moreover", "consequently")
 - Examples can be longer (10-15 words)
 - Use varied sentence structures`,
+    'upper-intermediate': `DIFFICULTY: UPPER-INTERMEDIATE
+- Blend conversational and academic vocabulary with occasional idioms
+- Use COMPLEX sentences with subordinate clauses and contrast markers
+- Encourage nuanced transitions ("nevertheless", "in contrast", "on the flip side")
+- Examples can be 15-18 words and include descriptive detail
+- Highlight subtle tone shifts or pragmatic cues`,
     advanced: `DIFFICULTY: ADVANCED
 - Use SOPHISTICATED VOCABULARY and expressions
 - Include complex sentence structures
@@ -203,6 +482,7 @@ You are an expert language tutor. Create a speaking lesson plan in JSON format.
 Topic: "${topic}"
 Target language: ${targetLang}
 Native language: ${nativeLang}
+Expression explanation language: ${expressionLang}
 Difficulty level: ${difficulty}
 
 ${difficultyInstructions[difficulty]}
@@ -216,7 +496,7 @@ TASK 1: Choose ONE graphic organizer type:
 TASK 2: Generate exactly ${expressionCount} expressions. Each expression needs:
 - phrase: in ${targetLang} (follow difficulty guidelines above)
 - type: "idiom", "slang", or "common"
-- explanation: in ${nativeLang}
+- explanation: in ${expressionLang}
 - example: sentence in ${targetLang} (follow difficulty guidelines above)
 
 OUTPUT FORMAT - Return ONLY valid JSON, no markdown, no explanation:
@@ -279,7 +559,7 @@ Expressions array (same for all types):
   {
     "phrase": "phrase in ${targetLang}",
     "type": "idiom",
-    "explanation": "explanation in ${nativeLang}",
+    "explanation": "explanation in ${expressionLang}",
     "example": "example sentence in ${targetLang}"
   }
 ]
@@ -293,6 +573,7 @@ IMPORTANT:
   ` : `
     You are an expert language tutor. Create a speaking lesson plan for the topic: "${topic}".
     The student's target language is "${targetLang}" and their native language is "${nativeLang}".
+    Provide expression explanations in "${expressionLang}".
     Difficulty level: ${difficulty}
     
     ${difficultyInstructions[difficulty]}
@@ -303,7 +584,7 @@ IMPORTANT:
        
     2. Generate ${expressionCount} useful expressions (mix of common phrases, idioms, and slang) relevant to this topic.
        - The phrase and example sentence must be in the target language (${targetLang}).
-       - The explanation must be in the native language (${nativeLang}) to ensure understanding.
+       - The explanation must be in ${expressionLang} to ensure understanding.
        - Follow the difficulty guidelines above for vocabulary and sentence complexity.
     
     Return valid JSON only. Do not wrap in markdown code blocks.
@@ -456,7 +737,8 @@ export const analyzeAudio = async (
   targetLang: string, 
   nativeLang: string,
   config: LLMConfig = DEFAULT_CONFIG,
-  whisperConfig: WhisperConfig
+  whisperConfig: WhisperConfig,
+  promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.feedback
 ): Promise<AnalysisResult> => {
   // Step 1: Transcribe audio using Whisper
   let transcription: string;
@@ -473,66 +755,11 @@ export const analyzeAudio = async (
 
   // Step 2: Analyze transcription using LLM
   const isLocalModel = config.provider === 'ollama';
-  
-  const promptText = isLocalModel ? `
-Analyze the following speech transcription from a student practicing "${targetLang}".
-Transcription: "${transcription}"
-
-Provide comprehensive feedback following IELTS Speaking criteria:
-
-1. EXACT TRANSCRIPTION: Use the provided transcription above.
-
-2. IMPROVED TEXT: A natural, polished version of the entire speech in "${targetLang}".
-
-3. SENTENCE-BY-SENTENCE FEEDBACK: Identify specific sentences with errors. For each:
-   - original: the original sentence
-   - improved: corrected version (in ${targetLang})
-   - explanation: concise explanation focusing on Task Response, Coherence, Cohesion, Vocabulary, or Grammar (in ${nativeLang})
-
-4. OVERALL FEEDBACK (IELTS criteria):
-   - taskResponse: Evaluate how well the speech addresses the topic, stays on topic, and develops ideas (in ${nativeLang})
-   - cohesion: Evaluate use of connectors, pronouns, and logical flow between sentences (in ${nativeLang})
-   - coherence: Evaluate logical consistency, detail development, and how easy it is to follow the argument (in ${nativeLang})
-   - vocabulary: Evaluate vocabulary range, accuracy, and appropriateness (in ${nativeLang})
-   - grammar: Evaluate grammatical accuracy and range of structures (in ${nativeLang})
-
-OUTPUT FORMAT - Return ONLY valid JSON:
-{
-  "transcription": "...",
-  "improvedText": "...",
-  "feedback": [
-    {"original": "...", "improved": "...", "explanation": "..."}
-  ],
-  "overallFeedback": {
-    "taskResponse": "...",
-    "cohesion": "...",
-    "coherence": "...",
-    "vocabulary": "...",
-    "grammar": "..."
-  }
-}
-  ` : `
-    Analyze the following speech transcription from a student practicing "${targetLang}".
-    The transcription is: "${transcription}"
-    
-    Please provide comprehensive feedback following IELTS Speaking criteria:
-    
-    1. The exact transcription (use the provided transcription above).
-    2. An improved, natural version of the entire speech in "${targetLang}".
-    3. Identify specific sentences with errors. For each error, provide:
-       - original: the original sentence
-       - improved: the corrected version (in ${targetLang})
-       - explanation: a concise explanation focusing on Task Response, Coherence, Cohesion, Vocabulary, or Grammar (in ${nativeLang})
-    4. Overall Feedback (IELTS criteria):
-       - taskResponse: Evaluate how well the speech addresses the topic, stays on topic, and develops ideas (in ${nativeLang})
-       - cohesion: Evaluate use of connectors, pronouns, and logical flow between sentences (in ${nativeLang})
-       - coherence: Evaluate logical consistency, detail development, and how easy it is to follow the argument (in ${nativeLang})
-       - vocabulary: Evaluate vocabulary range, accuracy, and appropriateness (in ${nativeLang})
-       - grammar: Evaluate grammatical accuracy and range of structures (in ${nativeLang})
-    
-    Return valid JSON only with keys: transcription, improvedText, feedback (array of {original, improved, explanation}), overallFeedback (object with taskResponse, coherence, cohesion, vocabulary, grammar).
-    Do not wrap in markdown code blocks.
-  `;
+  const promptText = applyPromptTemplate(promptTemplate, {
+    targetLang,
+    nativeLang,
+    transcription
+  });
 
   try {
     let jsonText = "";
@@ -621,7 +848,8 @@ OUTPUT FORMAT - Return ONLY valid JSON:
     
     // Add IDs to feedback items
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const feedback = (data.feedback || []).map((f: any) => ({...f, id: crypto.randomUUID()}));
+    let feedback = (data.feedback || []).map((f: any) => ({...f, id: crypto.randomUUID()}));
+    feedback = mapFragmentsToFullSentences(feedback, transcription);
     
     // Validate and extract overallFeedback
     const overallFeedback = data.overallFeedback ? {
@@ -648,14 +876,13 @@ OUTPUT FORMAT - Return ONLY valid JSON:
 export const generateStory = async (
   phrases: string[], 
   targetLang: string,
-  config: LLMConfig = DEFAULT_CONFIG
+  config: LLMConfig = DEFAULT_CONFIG,
+  promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.story
 ): Promise<string> => {
-  const prompt = `
-    Write a fun, engaging short story (approx 150 words) in ${targetLang} that incorporates the following expressions:
-    ${JSON.stringify(phrases)}
-    
-    Please wrap the specific expressions used in the story with double asterisks, e.g., **piece of cake**.
-  `;
+  const prompt = applyPromptTemplate(promptTemplate, {
+    targetLang,
+    phrases: JSON.stringify(phrases)
+  });
 
   try {
     if (config.provider === 'gemini') {
@@ -680,15 +907,15 @@ export const generateSampleSpeech = async (
   topic: string,
   phrases: string[],
   targetLang: string,
-  config: LLMConfig = DEFAULT_CONFIG
+  config: LLMConfig = DEFAULT_CONFIG,
+  promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.sample
 ): Promise<string> => {
-  const prompt = `
-    Write a natural speech or monologue (approx 100-150 words) about "${topic}" in "${targetLang}".
-    You MUST use at least ${Math.min(phrases.length, 5)} of the following expressions naturally in the text:
-    ${JSON.stringify(phrases)}
-
-    Please wrap the specific expressions used in the text with double asterisks, e.g., **piece of cake**.
-  `;
+  const prompt = applyPromptTemplate(promptTemplate, {
+    topic,
+    targetLang,
+    phrases: JSON.stringify(phrases),
+    minCount: Math.min(phrases.length, 5).toString()
+  });
 
   try {
     if (config.provider === 'gemini') {
@@ -712,11 +939,14 @@ export const generateSampleSpeech = async (
 export const generateInspirePrompt = async (
   difficulty: Difficulty,
   previousPrompts: string[],
-  config: LLMConfig = DEFAULT_CONFIG
+  config: LLMConfig = DEFAULT_CONFIG,
+  promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.inspire
 ): Promise<string> => {
   const levelMap: Record<Difficulty, string> = {
     beginner: 'Beginner (A1-A2)',
+    'pre-intermediate': 'Pre-intermediate (A2-B1)',
     intermediate: 'Intermediate (B1-B2)',
+    'upper-intermediate': 'Upper-intermediate (B2-C1)',
     advanced: 'Advanced (C1-C2)'
   };
 
@@ -726,23 +956,11 @@ export const generateInspirePrompt = async (
     ? `Previously generated prompts:\n${trimmedHistory.slice(0, 12).map((p, idx) => `${idx + 1}. ${p}`).join('\n')}\nAvoid repeating or closely paraphrasing these topics.`
     : 'No previous prompts to avoid for this learner.';
 
-  const request = `
-You are a structural speaking coach.
-
-Learner level: ${levelMap[difficulty]}.
-
-Choose exactly ONE prompt type from this list and reflect it naturally in the topic without naming the type: ${promptTypes.join(', ')}.
-
-${historyText}
-
-Requirements:
-1. Generate ONE prompt only.
-2. The sentence MUST start with exactly one of these stems: "Describe", "Discuss", or "Talk about".
-3. The topic must be specific, age-appropriate, and achievable for ${levelMap[difficulty]} learners.
-4. Encourage variety by using fresh settings, situations, emotions, or perspectives.
-5. Keep output to a single sentence ending with a period. No bullet points, numbering, emojis, or explanations.
-
-Return only the prompt text.`;
+  const request = applyPromptTemplate(promptTemplate, {
+    level: levelMap[difficulty],
+    promptTypes: promptTypes.join(', '),
+    history: historyText
+  });
 
   try {
     let rawResponse = '';
@@ -786,5 +1004,59 @@ Return only the prompt text.`;
   } catch (error) {
     console.error('Error generating inspire prompt:', error);
     throw new Error(`Failed to generate speaking prompt: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+};
+
+export const generateLiveHint = async (
+  topic: string,
+  difficulty: Difficulty,
+  config: LLMConfig = DEFAULT_CONFIG,
+  promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.liveHint
+): Promise<{ type: 'question' | 'hint'; message: string }> => {
+  const request = applyPromptTemplate(promptTemplate, {
+    topic,
+    difficulty
+  });
+
+  try {
+    let responseText = '';
+
+    if (config.provider === 'gemini') {
+      const ai = getGeminiClient(config.apiKey);
+      const result = await ai.models.generateContent({
+        model: config.model || "gemini-2.5-flash",
+        contents: request,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              type: { type: Type.STRING, enum: ["question", "hint"] },
+              message: { type: Type.STRING }
+            },
+            required: ["type", "message"]
+          }
+        }
+      });
+      responseText = result.text || '';
+    } else {
+      const messages = [
+        { role: "system", content: "You provide brief JSON hints to help language learners continue speaking." },
+        { role: "user", content: request }
+      ];
+      responseText = await getOpenAICompatibleResponse(config, messages, true);
+    }
+
+    const parsed = JSON.parse(responseText);
+    if (!parsed || typeof parsed.message !== 'string' || (parsed.type !== 'question' && parsed.type !== 'hint')) {
+      throw new Error('Invalid hint payload');
+    }
+    return parsed;
+  } catch (error) {
+    console.error("Error generating live hint:", error);
+    return {
+      type: 'hint',
+      message: 'Try describing how the situation made you feel or what you learned from it.'
+    };
   }
 };

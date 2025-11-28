@@ -1,7 +1,8 @@
 import React from 'react';
-import { Star, Info, Volume2 } from 'lucide-react';
+import { Star, Info, Volume2, Pause } from 'lucide-react';
 import { Expression } from '../types';
-import { detectSpeechLang, speakText } from '../services/audioService';
+import { detectSpeechLang } from '../services/audioService';
+import { useSpeechPlayback } from '../hooks/useSpeechPlayback';
 
 interface Props {
   expressions: Expression[];
@@ -11,11 +12,11 @@ interface Props {
 }
 
 const ExpressionList: React.FC<Props> = ({ expressions, favorites, toggleFavorite, targetLang }) => {
-  const playAudio = (text: string) => {
+  const { togglePlayback, isActive } = useSpeechPlayback();
+
+  const handlePlayback = (id: string, text: string) => {
     const lang = detectSpeechLang(text, targetLang);
-    speakText(text, { lang, rate: 0.9 }).catch((error) => {
-      console.error('Speech synthesis failed:', error);
-    });
+    togglePlayback(id, text, { lang, rate: 0.9 });
   };
 
   return (
@@ -34,11 +35,15 @@ const ExpressionList: React.FC<Props> = ({ expressions, favorites, toggleFavorit
               </div>
               <div className="flex gap-1">
                 <button
-                  onClick={() => playAudio(expr.phrase)}
-                  className="p-1.5 rounded-full text-slate-400 hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
+                  onClick={() => handlePlayback(`phrase-${expr.id}`, expr.phrase)}
+                  className={`p-1.5 rounded-full transition-colors ${
+                    isActive(`phrase-${expr.id}`)
+                      ? 'bg-indigo-600 text-white shadow-inner'
+                      : 'text-slate-400 hover:bg-indigo-50 hover:text-indigo-600'
+                  }`}
                   title="Listen"
                 >
-                  <Volume2 className="w-4 h-4" />
+                  {isActive(`phrase-${expr.id}`) ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                 </button>
                 <button 
                   onClick={() => toggleFavorite(expr)}
@@ -49,7 +54,7 @@ const ExpressionList: React.FC<Props> = ({ expressions, favorites, toggleFavorit
               </div>
             </div>
             
-            <h4 className="text-lg font-bold text-slate-800 mb-1 cursor-pointer hover:text-indigo-600" onClick={() => playAudio(expr.phrase)}>
+            <h4 className="text-lg font-bold text-slate-800 mb-1 cursor-pointer hover:text-indigo-600" onClick={() => handlePlayback(`phrase-${expr.id}`, expr.phrase)}>
               {expr.phrase}
             </h4>
             
@@ -61,10 +66,14 @@ const ExpressionList: React.FC<Props> = ({ expressions, favorites, toggleFavorit
             <div className="bg-slate-50 p-2 rounded border-l-4 border-blue-400 text-xs italic text-slate-700 flex justify-between items-start group/ex">
               <span className="flex-1">"{expr.example}"</span>
               <button 
-                onClick={() => playAudio(expr.example)}
-                className="opacity-0 group-hover/ex:opacity-100 p-1 text-slate-400 hover:text-indigo-600 transition-opacity"
+                onClick={() => handlePlayback(`example-${expr.id}`, expr.example)}
+                className={`opacity-0 group-hover/ex:opacity-100 p-1 transition-all ${
+                  isActive(`example-${expr.id}`)
+                    ? 'text-indigo-600'
+                    : 'text-slate-400 hover:text-indigo-600'
+                }`}
               >
-                <Volume2 className="w-3 h-3" />
+                {isActive(`example-${expr.id}`) ? <Pause className="w-3 h-3" /> : <Volume2 className="w-3 h-3" />}
               </button>
             </div>
           </div>

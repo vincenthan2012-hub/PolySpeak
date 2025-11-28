@@ -1,12 +1,14 @@
-import React, { useState, useRef } from 'react';
-import { Mic, Square, Loader2, AlertCircle, Pause, Play, StopCircle } from 'lucide-react';
+import React, { useState, useRef, useEffect } from 'react';
+import { Mic, Square, Loader2, AlertCircle, Pause, Play, X } from 'lucide-react';
 
 interface Props {
-  onAudioCaptured: (base64: string) => void;
+  onAudioCaptured: (base64: string, mimeType: string) => void;
   isAnalyzing: boolean;
+  onStallDetected?: () => void;
+  onSpeechResumed?: () => void;
 }
 
-const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
+const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallDetected, onSpeechResumed }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -14,17 +16,121 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
   const chunksRef = useRef<Blob[]>([]);
   const streamRef = useRef<MediaStream | null>(null);
   const discardRef = useRef(false);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const analyserRef = useRef<AnalyserNode | null>(null);
+  const silenceStartRef = useRef<number | null>(null);
+  const silenceNotifiedRef = useRef(false);
+  const monitorIntervalRef = useRef<number | null>(null);
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+
+  const preferredMimeTypeRef = useRef<string>('audio/webm');
+
+  const stopSilenceMonitor = () => {
+    if (monitorIntervalRef.current) {
+      window.clearInterval(monitorIntervalRef.current);
+      monitorIntervalRef.current = null;
+    }
+    silenceStartRef.current = null;
+    silenceNotifiedRef.current = false;
+
+    if (sourceRef.current) {
+      try {
+        sourceRef.current.disconnect();
+      } catch {
+        // ignore
+      }
+      sourceRef.current = null;
+    }
+
+    if (analyserRef.current) {
+      analyserRef.current.disconnect();
+      analyserRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close().catch(() => undefined);
+      audioContextRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      stopSilenceMonitor();
+      streamRef.current?.getTracks().forEach(track => track.stop());
+    };
+  }, []);
+
+  const startSilenceMonitor = (stream: MediaStream) => {
+    try {
+      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+      if (!AudioCtx) return;
+
+      const audioContext = new AudioCtx();
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 2048;
+      const source = audioContext.createMediaStreamSource(stream);
+      source.connect(analyser);
+
+      const dataArray = new Uint8Array(analyser.fftSize);
+
+      audioContextRef.current = audioContext;
+      analyserRef.current = analyser;
+      sourceRef.current = source;
+
+      monitorIntervalRef.current = window.setInterval(() => {
+        if (!analyserRef.current) return;
+        analyserRef.current.getByteTimeDomainData(dataArray);
+
+        let sumSquares = 0;
+        for (let i = 0; i < dataArray.length; i++) {
+          const value = (dataArray[i] - 128) / 128;
+          sumSquares += value * value;
+        }
+
+        const rms = Math.sqrt(sumSquares / dataArray.length);
+        const isSilent = rms < 0.02;
+        const now = performance.now();
+
+        if (isSilent) {
+          if (silenceStartRef.current === null) {
+            silenceStartRef.current = now;
+          }
+          if (!silenceNotifiedRef.current && now - silenceStartRef.current > 3000) {
+            silenceNotifiedRef.current = true;
+            onStallDetected?.();
+          }
+        } else {
+          silenceStartRef.current = null;
+          if (silenceNotifiedRef.current) {
+            silenceNotifiedRef.current = false;
+            onSpeechResumed?.();
+          }
+        }
+      }, 250);
+    } catch (err) {
+      console.warn('Silence monitor unavailable', err);
+    }
+  };
 
   const startRecording = async () => {
     setError(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      const preferredMimeType = typeof MediaRecorder !== 'undefined' && typeof MediaRecorder.isTypeSupported === 'function'
+        ? (MediaRecorder.isTypeSupported('audio/mpeg') ? 'audio/mpeg' : 'audio/webm')
+        : 'audio/webm';
+      preferredMimeTypeRef.current = preferredMimeType;
+      const recorderOptions = MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(preferredMimeType)
+        ? { mimeType: preferredMimeType }
+        : undefined;
+      const mediaRecorder = new MediaRecorder(stream, recorderOptions);
       mediaRecorderRef.current = mediaRecorder;
       chunksRef.current = [];
       streamRef.current = stream;
       setIsPaused(false);
       discardRef.current = false;
+      stopSilenceMonitor();
+      startSilenceMonitor(stream);
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
@@ -37,7 +143,8 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
         const shouldDiscard = discardRef.current;
         discardRef.current = false;
 
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
+        const mimeType = mediaRecorderRef.current?.mimeType || preferredMimeTypeRef.current || 'audio/webm';
+        const blob = new Blob(chunksRef.current, { type: mimeType });
         
         // Validate audio size (should be at least 1KB for a meaningful recording)
         if (!shouldDiscard && blob.size < 1000) {
@@ -55,7 +162,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
             const base64String = reader.result as string;
             const base64Data = base64String.split(',')[1];
             console.log('[AudioRecorder] Base64 data length:', base64Data.length);
-            onAudioCaptured(base64Data);
+            onAudioCaptured(base64Data, mimeType);
           };
           reader.onerror = () => {
             setError("Failed to process audio. Please try again.");
@@ -80,6 +187,8 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
       setIsPaused(false);
+      stopSilenceMonitor();
+      onSpeechResumed?.();
     }
   };
 
@@ -87,6 +196,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
     if (mediaRecorderRef.current && isRecording && !isPaused && typeof mediaRecorderRef.current.pause === 'function') {
       mediaRecorderRef.current.pause();
       setIsPaused(true);
+      stopSilenceMonitor();
     }
   };
 
@@ -94,6 +204,10 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
     if (mediaRecorderRef.current && isPaused && typeof mediaRecorderRef.current.resume === 'function') {
       mediaRecorderRef.current.resume();
       setIsPaused(false);
+      if (streamRef.current) {
+        startSilenceMonitor(streamRef.current);
+      }
+      onSpeechResumed?.();
     }
   };
 
@@ -104,11 +218,13 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
       setIsRecording(false);
       setIsPaused(false);
       setError(null);
+      stopSilenceMonitor();
+      onSpeechResumed?.();
     }
   };
 
   return (
-    <div className="bg-white/90 backdrop-blur-md p-2 pr-4 rounded-full shadow-lg border border-indigo-100 flex items-center justify-between gap-4 max-w-md mx-auto transition-all hover:shadow-xl hover:shadow-indigo-500/10 ring-4 ring-white/50">
+    <div className="bg-white/90 backdrop-blur-md p-3 pl-4 rounded-full shadow-lg border border-indigo-100 flex items-center justify-between gap-4 max-w-md mx-auto transition-all hover:shadow-xl hover:shadow-indigo-500/10 ring-4 ring-white/50">
       
       {isAnalyzing ? (
          <div className="flex items-center gap-3 flex-1 px-2 py-1">
@@ -146,40 +262,43 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing }) => {
              )}
           </div>
 
-          {isRecording && (
-            <div className="flex items-center gap-2">
+          <div className="flex items-center gap-3">
+            {isRecording && (
+              <button
+                onClick={cancelRecording}
+                className="w-12 h-12 rounded-full bg-slate-100/90 text-slate-500 flex items-center justify-center border border-slate-200 shadow-sm hover:bg-slate-200 transition-all"
+                title="Discard recording"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            )}
+
+            <button
+              onClick={isRecording ? finishRecording : startRecording}
+              className={`
+                shrink-0 w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-lg focus:outline-none
+                ${isRecording 
+                  ? 'bg-red-500 text-white hover:bg-red-600 ring-4 ring-red-100/80'
+                  : 'bg-gradient-to-br from-red-500 to-pink-600 text-white hover:scale-105 active:scale-95'}
+              `}
+            >
+              {isRecording ? (
+                <Square className="w-5 h-5 fill-current" />
+              ) : (
+                <Mic className="w-6 h-6" />
+              )}
+            </button>
+
+            {isRecording && (
               <button
                 onClick={isPaused ? resumeRecording : pauseRecording}
-                className="w-10 h-10 rounded-full border border-slate-200 flex items-center justify-center text-slate-500 hover:bg-slate-50 transition-colors"
+                className="w-12 h-12 rounded-full bg-slate-100/90 text-slate-600 flex items-center justify-center border border-slate-200 shadow-sm hover:bg-slate-200 transition-all"
                 title={isPaused ? '继续录音' : '暂停录音'}
               >
                 {isPaused ? <Play className="w-4 h-4" /> : <Pause className="w-4 h-4" />}
               </button>
-              <button
-                onClick={cancelRecording}
-                className="w-10 h-10 rounded-full border border-red-200 flex items-center justify-center text-red-500 hover:bg-red-50 transition-colors"
-                title="停止并丢弃录音"
-              >
-                <StopCircle className="w-4 h-4" />
-              </button>
-            </div>
-          )}
-
-          <button
-            onClick={isRecording ? finishRecording : startRecording}
-            className={`
-              shrink-0 w-12 h-12 rounded-full flex items-center justify-center transition-all shadow-md hover:shadow-lg focus:outline-none
-              ${isRecording 
-                ? 'bg-slate-900 text-white hover:bg-slate-800 ring-2 ring-red-200' 
-                : 'bg-gradient-to-br from-red-500 to-pink-600 text-white hover:scale-105 active:scale-95'}
-            `}
-          >
-            {isRecording ? (
-              <Square className="w-5 h-5 fill-current" />
-            ) : (
-              <Mic className="w-6 h-6" />
             )}
-          </button>
+          </div>
         </>
       )}
     </div>

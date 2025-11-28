@@ -40,9 +40,11 @@ export interface AnalysisResult {
   improvedText: string;
   feedback: FeedbackItem[];
   overallFeedback?: OverallFeedback;
+  audioUrl?: string;
+  audioMimeType?: string;
 }
 
-export type Difficulty = 'beginner' | 'intermediate' | 'advanced';
+export type Difficulty = 'beginner' | 'pre-intermediate' | 'intermediate' | 'upper-intermediate' | 'advanced';
 
 export interface FlashcardState {
   ease: number;
@@ -75,6 +77,14 @@ export interface WhisperConfig {
   enabled: boolean;
   model: 'tiny' | 'base' | 'small' | 'medium' | 'large' | 'large-v2' | 'large-v3';
   language?: string; // Optional language code (e.g., 'en', 'es', 'zh')
+}
+
+export interface PromptSettings {
+  inspire: string;
+  liveHint: string;
+  story: string;
+  feedback: string;
+  sample: string;
 }
 
 export const LANGUAGES: Language[] = [

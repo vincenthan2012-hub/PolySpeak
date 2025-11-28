@@ -1,12 +1,12 @@
-import React, { useState } from 'react';
-import { SavedItem, Expression, FeedbackItem } from '../types';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { SavedItem, Expression, FeedbackItem, LLMConfig, PromptSettings } from '../types';
 import { generateStory } from '../services/geminiService';
-import { Sparkles, BookOpen, RotateCw, Loader2, AlertCircle, Check, X, Volume2, Plus, Download, Trash2 } from 'lucide-react';
-import { detectSpeechLang, speakText } from '../services/audioService';
+import { Sparkles, BookOpen, Loader2, AlertCircle, X, Volume2, Pause, Plus, Download, Trash2 } from 'lucide-react';
+import { detectSpeechLang } from '../services/audioService';
+import { useSpeechPlayback } from '../hooks/useSpeechPlayback';
 import { 
   checkAnkiConnect, 
   getDeckNames, 
-  getModelNames, 
   addExpressionToAnki, 
   addFeedbackToAnki,
   batchAddExpressionsToAnki,
@@ -21,38 +21,139 @@ interface Props {
   onDeleteSavedItems: (itemIds: string[], itemType: 'expression' | 'feedback') => void;
   mode: 'favorites' | 'flashcards';
   targetLang: string;
+  llmConfig: LLMConfig;
+  promptSettings: PromptSettings;
 }
 
-const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDeleteSavedItem, onDeleteSavedItems, mode, targetLang }) => {
+const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDeleteSavedItem, onDeleteSavedItems, mode, targetLang, llmConfig, promptSettings }) => {
   const [activeTab, setActiveTab] = useState<'phrases' | 'feedback'>('phrases');
   const [story, setStory] = useState<string | null>(null);
   const [isGeneratingStory, setIsGeneratingStory] = useState(false);
   const [selectedPhraseIds, setSelectedPhraseIds] = useState<Set<string>>(new Set());
   const [selectedFeedbackIds, setSelectedFeedbackIds] = useState<Set<string>>(new Set());
+  const [phraseSort, setPhraseSort] = useState<{ field: 'phrase' | 'date'; direction: 'asc' | 'desc' }>({ field: 'date', direction: 'desc' });
+  const [feedbackSort, setFeedbackSort] = useState<{ field: 'original' | 'date'; direction: 'asc' | 'desc' }>({ field: 'date', direction: 'desc' });
   
   // Anki State
   const [showAnkiModal, setShowAnkiModal] = useState(false);
   const [ankiConfig, setAnkiConfig] = useState<AnkiConfig>({ deckName: 'PolySpeak', modelName: '' });
   const [isExportingToAnki, setIsExportingToAnki] = useState(false);
   const [ankiDecks, setAnkiDecks] = useState<string[]>([]);
-  const [ankiModels, setAnkiModels] = useState<string[]>([]);
-  const [isAnkiModalOpen, setIsAnkiModalOpen] = useState(false);
   const [pendingAnkiItem, setPendingAnkiItem] = useState<{ type: 'expression' | 'feedback'; item: any } | null>(null);
   const [isBatchMode, setIsBatchMode] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Flashcard State
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
 
-  const phrases = savedItems.filter(i => i.type === 'expression').map(i => ({ ...i, data: i.data as Expression }));
-  const feedback = savedItems.filter(i => i.type === 'feedback').map(i => i.data as FeedbackItem);
-  const flashcards = phrases; 
- 
-  const playAudio = (text: string) => {
-    const lang = detectSpeechLang(text, targetLang);
-    speakText(text, { lang }).catch((error) => {
-      console.error('Speech synthesis failed:', error);
+  const expressions = savedItems
+    .filter(i => i.type === 'expression')
+    .map(i => ({ ...i, data: i.data as Expression }));
+  const feedbackItems = savedItems
+    .filter(i => i.type === 'feedback')
+    .map(i => ({ ...i, data: i.data as FeedbackItem }));
+  const flashcards = expressions;
+  const { togglePlayback, isActive } = useSpeechPlayback();
+
+  const formatDate = (timestamp?: number) => {
+    if (!timestamp) return '—';
+    const date = new Date(timestamp);
+    const year = date.getFullYear();
+    const month = `${date.getMonth() + 1}`.padStart(2, '0');
+    const day = `${date.getDate()}`.padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  };
+
+  const sortedExpressions = useMemo(() => {
+    const items = [...expressions];
+    items.sort((a, b) => {
+      if (phraseSort.field === 'phrase') {
+        const aPhrase = a.data.phrase.toLowerCase();
+        const bPhrase = b.data.phrase.toLowerCase();
+        const comparison = aPhrase.localeCompare(bPhrase, undefined, { sensitivity: 'base' });
+        return phraseSort.direction === 'asc' ? comparison : -comparison;
+      }
+      const aTime = a.timestamp ?? 0;
+      const bTime = b.timestamp ?? 0;
+      return phraseSort.direction === 'asc' ? aTime - bTime : bTime - aTime;
     });
+    return items;
+  }, [expressions, phraseSort]);
+
+  const sortedFeedback = useMemo(() => {
+    const items = [...feedbackItems];
+    items.sort((a, b) => {
+      if (feedbackSort.field === 'original') {
+        const aText = a.data.original.toLowerCase();
+        const bText = b.data.original.toLowerCase();
+        const comparison = aText.localeCompare(bText, undefined, { sensitivity: 'base' });
+        return feedbackSort.direction === 'asc' ? comparison : -comparison;
+      }
+      const aTime = a.timestamp ?? 0;
+      const bTime = b.timestamp ?? 0;
+      return feedbackSort.direction === 'asc' ? aTime - bTime : bTime - aTime;
+    });
+    return items;
+  }, [feedbackItems, feedbackSort]);
+
+  const togglePhraseSort = (field: 'phrase' | 'date') => {
+    setPhraseSort(prev => {
+      if (prev.field === field) {
+        return { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { field, direction: 'asc' };
+    });
+  };
+
+  const toggleFeedbackSort = (field: 'original' | 'date') => {
+    setFeedbackSort(prev => {
+      if (prev.field === field) {
+        return { field, direction: prev.direction === 'asc' ? 'desc' : 'asc' };
+      }
+      return { field, direction: 'asc' };
+    });
+  };
+
+  const areAllExpressionsSelected = sortedExpressions.length > 0 && sortedExpressions.every(item => selectedPhraseIds.has(item.data.id));
+  const areAllFeedbackSelected = sortedFeedback.length > 0 && sortedFeedback.every(item => selectedFeedbackIds.has(item.data.id));
+
+  const toggleAllExpressions = (checked: boolean) => {
+    if (checked) {
+      setSelectedPhraseIds(new Set(sortedExpressions.map(item => item.data.id)));
+    } else {
+      setSelectedPhraseIds(new Set());
+    }
+  };
+
+  const toggleAllFeedback = (checked: boolean) => {
+    if (checked) {
+      setSelectedFeedbackIds(new Set(sortedFeedback.map(item => item.data.id)));
+    } else {
+      setSelectedFeedbackIds(new Set());
+    }
+  };
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    setToast({ message, type });
+    toastTimerRef.current = setTimeout(() => setToast(null), 4000);
+  };
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
+  }, []);
+
+  const handlePlayback = (id: string, text: string) => {
+    const lang = detectSpeechLang(text, targetLang);
+    togglePlayback(id, text, { lang });
   };
 
   const toggleSelection = (id: string) => {
@@ -84,9 +185,8 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
         return;
       }
 
-      const [decks, models] = await Promise.all([getDeckNames(), getModelNames()]);
+      const decks = await getDeckNames();
       setAnkiDecks(decks);
-      setAnkiModels(models);
       
       if (item) {
         setPendingAnkiItem(item);
@@ -110,7 +210,7 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
       if (isBatchMode) {
         // Batch export
         if (activeTab === 'phrases' && selectedPhraseIds.size > 0) {
-          const selectedPhrases = phrases.filter(p => selectedPhraseIds.has(p.data.id));
+          const selectedPhrases = expressions.filter(p => selectedPhraseIds.has(p.data.id));
           const result = await batchAddExpressionsToAnki(
             selectedPhrases.map(p => ({
               phrase: p.data.phrase,
@@ -119,29 +219,39 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
             })),
             ankiConfig
           );
-          alert(`批量导入完成！\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+          if (result.failed > 0 || result.errors.length > 0) {
+            alert(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+          } else {
+            showToast(`批量导入完成！成功: ${result.success} 张卡片`);
+          }
           setSelectedPhraseIds(new Set());
         } else if (activeTab === 'feedback' && selectedFeedbackIds.size > 0) {
-          const selectedFeedbacks = feedback.filter(f => selectedFeedbackIds.has(f.id));
+          const selectedFeedbacks = feedbackItems.filter(f => selectedFeedbackIds.has(f.data.id));
           const result = await batchAddFeedbackToAnki(
             selectedFeedbacks.map(f => ({
-              original: f.original,
-              improved: f.improved,
-              explanation: f.explanation
+              original: f.data.original,
+              improved: f.data.improved,
+              explanation: f.data.explanation
             })),
             ankiConfig
           );
-          alert(`批量导入完成！\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+          if (result.failed > 0 || result.errors.length > 0) {
+            alert(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+          } else {
+            showToast(`批量导入完成！成功: ${result.success} 张卡片`);
+          }
           setSelectedFeedbackIds(new Set());
+        } else {
+          alert('请选择要导出的项目');
         }
       } else if (pendingAnkiItem) {
         // Single export
         if (pendingAnkiItem.type === 'expression') {
           await addExpressionToAnki(pendingAnkiItem.item, ankiConfig);
-          alert('✅ 短语已成功添加到 Anki！');
+          showToast('✅ 短语已成功添加到 Anki！');
         } else {
           await addFeedbackToAnki(pendingAnkiItem.item, ankiConfig);
-          alert('✅ 反馈已成功添加到 Anki！');
+          showToast('✅ 反馈已成功添加到 Anki！');
         }
       }
       
@@ -158,9 +268,9 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
     if (selectedPhraseIds.size === 0) return;
     setIsGeneratingStory(true);
     try {
-      const selectedPhrases = phrases.filter(p => selectedPhraseIds.has(p.data.id));
+      const selectedPhrases = expressions.filter(p => selectedPhraseIds.has(p.data.id));
       const phraseList = selectedPhrases.map(p => p.data.phrase);
-      const storyText = await generateStory(phraseList, targetLang);
+      const storyText = await generateStory(phraseList, targetLang, llmConfig, promptSettings.story);
       setStory(storyText);
     } finally {
       setIsGeneratingStory(false);
@@ -236,11 +346,21 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
 
   return (
     <div className="max-w-5xl mx-auto">
+      {toast && (
+        <div
+          className={`fixed bottom-6 left-1/2 -translate-x-1/2 md:left-auto md:right-8 md:translate-x-0 z-50 px-5 py-3 rounded-2xl shadow-2xl text-sm font-semibold flex items-center gap-3 ${
+            toast.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
+          }`}
+        >
+          {toast.type === 'success' ? <Sparkles className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
+          {toast.message}
+        </div>
+      )}
       {!isFlashcardMode && (
         <div className="flex flex-wrap gap-2 border-b border-slate-200 mb-8 pb-1">
           {[
-            { id: 'phrases', label: `Saved Phrases (${phrases.length})` },
-            { id: 'feedback', label: `Saved Feedback (${feedback.length})` },
+            { id: 'phrases', label: `Saved Phrases (${expressions.length})` },
+            { id: 'feedback', label: `Saved Feedback (${feedbackItems.length})` },
           ].map(tab => (
             <button
               key={tab.id}
@@ -259,250 +379,364 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
       <div className="min-h-[500px]">
         {!isFlashcardMode && activeTab === 'phrases' && (
           <div className="space-y-6 animate-in fade-in duration-300">
-            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 pb-2 border-b border-slate-100">
-                 <div className="w-full sm:w-auto">
-                    <h3 className="text-lg font-bold text-slate-800">Your Collection</h3>
-                    <p className="text-sm text-slate-500">Select phrases to generate a story or export to Anki.</p>
-                 </div>
-                 <div className="flex gap-2 w-full sm:w-auto">
-                   {selectedPhraseIds.size > 0 && (
-                     <>
-                       <button 
-                         onClick={handleBatchDeletePhrases} 
-                         className="justify-center flex items-center gap-2 px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 shadow-sm transition-all active:scale-95 text-sm"
-                       >
-                         <Trash2 className="w-4 h-4" />
-                         批量删除 ({selectedPhraseIds.size})
-                       </button>
-                       <button 
-                         onClick={() => openAnkiModal(undefined, true)} 
-                         className="justify-center flex items-center gap-2 px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 shadow-sm transition-all active:scale-95 text-sm"
-                       >
-                         <Download className="w-4 h-4" />
-                         Export to Anki ({selectedPhraseIds.size})
-                       </button>
-                     </>
-                   )}
-                   <button 
-                      onClick={handleGenerateStory} 
-                      disabled={isGeneratingStory || selectedPhraseIds.size === 0}
-                      className="justify-center flex items-center gap-2 px-4 py-2 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 shadow-sm disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95 text-sm"
-                    >
-                      {isGeneratingStory ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
-                      Generate Story
-                      {selectedPhraseIds.size > 0 && <span className="bg-indigo-500 px-1.5 rounded text-xs ml-1">{selectedPhraseIds.size}</span>}
-                    </button>
-                 </div>
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between pb-4 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Saved Expressions</h3>
+                <p className="text-sm text-slate-500">Sort, batch export, or build a story from your favorites.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button 
+                  onClick={() => openAnkiModal(undefined, true)} 
+                  disabled={selectedPhraseIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-green-600 text-white hover:bg-green-700"
+                >
+                  <Download className="w-4 h-4" />
+                  Export Selected
+                </button>
+                <button 
+                  onClick={handleBatchDeletePhrases} 
+                  disabled={selectedPhraseIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-red-600 text-white hover:bg-red-700"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete Selected
+                </button>
+                <button 
+                  onClick={handleGenerateStory} 
+                  disabled={isGeneratingStory || selectedPhraseIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-indigo-600 text-white hover:bg-indigo-700"
+                >
+                  {isGeneratingStory ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
+                  Generate Story
+                </button>
+              </div>
             </div>
 
-             {story && (
-                 <div className="bg-indigo-50 p-6 rounded-xl border border-indigo-100 shadow-inner animate-in fade-in slide-in-from-top-2 relative">
-                   <button 
-                     onClick={() => setStory(null)}
-                     className="absolute top-3 right-3 p-1 text-indigo-300 hover:text-indigo-600 rounded-full hover:bg-indigo-100 transition-colors"
-                   >
-                     <X className="w-4 h-4" />
-                   </button>
-                   <div className="flex items-center gap-3 mb-3">
-                     <h4 className="text-indigo-900 font-bold flex items-center gap-2">
-                       <BookOpen className="w-4 h-4"/> 
-                       AI Generated Story
-                     </h4>
-                     <button onClick={() => playAudio(story)} className="p-1.5 bg-indigo-200 text-indigo-700 rounded-full hover:bg-indigo-300 transition-colors">
-                       <Volume2 className="w-4 h-4" />
-                     </button>
-                   </div>
-                   <div className="prose prose-slate max-w-none leading-loose text-slate-700">
-                     {renderStory(story)}
-                   </div>
-                 </div>
-               )}
-
-            <div>
-              {phrases.length === 0 ? (
-                 <div className="text-center py-12 bg-slate-50 rounded-xl border border-slate-200">
-                   <p className="text-slate-500 mb-2">No phrases saved yet.</p>
-                   <p className="text-sm text-slate-400">Practice speaking to collect expressions.</p>
-                 </div>
-              ) : (
-                <div className="grid gap-4 md:grid-cols-2">
-                  {phrases.map(item => {
-                    const p = item.data;
-                    const isSelected = selectedPhraseIds.has(p.id);
-                    
-                    return (
-                      <div 
-                        key={p.id} 
-                        onClick={() => toggleSelection(p.id)}
-                        className={`
-                          relative p-5 rounded-xl border shadow-sm transition-all cursor-pointer group select-none
-                          ${isSelected 
-                             ? 'bg-indigo-50 border-indigo-500 ring-1 ring-indigo-500' 
-                             : 'bg-white border-slate-200 hover:border-indigo-300 hover:shadow-md'}
-                        `}
-                      >
-                        <div className="flex justify-between items-start mb-2">
-                          <div className="flex items-center gap-2">
-                              <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors cursor-pointer
-                                 ${isSelected ? 'bg-indigo-600 border-indigo-600' : 'border-slate-300 bg-white'}
-                              `}>
-                                  {isSelected && <Check className="w-3 h-3 text-white" />}
-                              </div>
-                              <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider
-                                ${p.type === 'idiom' ? 'bg-purple-100 text-purple-700' : 
-                                  p.type === 'slang' ? 'bg-pink-100 text-pink-700' : 'bg-blue-100 text-blue-700'}`}>
-                                {p.type}
-                              </span>
-                          </div>
-                          
-                          <div className="flex gap-1">
-                            <button 
-                               onClick={(e) => { e.stopPropagation(); playAudio(p.phrase); }}
-                               className="p-1.5 rounded-full text-slate-400 hover:bg-indigo-100 hover:text-indigo-600 transition-colors"
-                            >
-                               <Volume2 className="w-4 h-4" />
-                            </button>
-                            <button 
-                               onClick={(e) => { 
-                                 e.stopPropagation(); 
-                                 openAnkiModal({ type: 'expression', item: { phrase: p.phrase, explanation: p.explanation, example: p.example } }, false);
-                               }}
-                               className="p-1.5 rounded-full text-slate-400 hover:bg-green-100 hover:text-green-600 transition-colors"
-                               title="Add to Anki"
-                            >
-                               <Plus className="w-4 h-4" />
-                            </button>
-                            <button 
-                               onClick={(e) => { 
-                                 e.stopPropagation(); 
-                                 if (confirm('确定要删除这个短语吗？')) {
-                                   onDeleteSavedItem(p.id, 'expression');
-                                 }
-                               }}
-                               className="p-1.5 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 transition-colors"
-                               title="删除"
-                            >
-                               <Trash2 className="w-4 h-4" />
-                            </button>
-                          </div>
-                        </div>
-                        
-                        <div className="font-bold text-lg text-slate-800 mb-2 group-hover:text-indigo-600 transition-colors ml-7">{p.phrase}</div>
-                        <div className="text-sm text-slate-600 mb-3 ml-7">{p.explanation}</div>
-                        <div className="text-xs bg-slate-50/50 p-2 rounded italic text-slate-500 border-l-2 border-slate-300 ml-7">"{p.example}"</div>
-                      </div>
-                    );
-                  })}
+            {story && (
+              <div className="bg-indigo-50 p-6 rounded-xl border border-indigo-100 shadow-inner relative">
+                <button 
+                  onClick={() => setStory(null)}
+                  className="absolute top-3 right-3 p-1 text-indigo-300 hover:text-indigo-600 rounded-full hover:bg-indigo-100 transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+                <div className="flex items-center gap-3 mb-3">
+                  <h4 className="text-indigo-900 font-bold flex items-center gap-2">
+                    <BookOpen className="w-4 h-4"/> 
+                    AI Generated Story
+                  </h4>
+                  <button 
+                    onClick={() => handlePlayback('story', story)} 
+                    className={`p-1.5 rounded-full transition-colors ${
+                      isActive('story') ? 'bg-indigo-600 text-white shadow-inner' : 'bg-indigo-200 text-indigo-700 hover:bg-indigo-300'
+                    }`}
+                  >
+                    {isActive('story') ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                  </button>
                 </div>
-              )}
+                <div className="prose prose-slate max-w-none leading-loose text-slate-700">
+                  {renderStory(story)}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => togglePhraseSort('phrase')}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${phraseSort.field === 'phrase' ? 'border-indigo-500 text-indigo-600 bg-indigo-50' : 'border-slate-200 text-slate-500 hover:text-slate-700'}`}
+                >
+                  Expression {phraseSort.field === 'phrase' ? (phraseSort.direction === 'asc' ? '↑' : '↓') : '↕'}
+                </button>
+                <button
+                  onClick={() => togglePhraseSort('date')}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${phraseSort.field === 'date' ? 'border-indigo-500 text-indigo-600 bg-indigo-50' : 'border-slate-200 text-slate-500 hover:text-slate-700'}`}
+                >
+                  Date {phraseSort.field === 'date' ? (phraseSort.direction === 'asc' ? '↑' : '↓') : '↕'}
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input 
+                  type="checkbox" 
+                  checked={areAllExpressionsSelected} 
+                  onChange={(e) => toggleAllExpressions(e.target.checked)} 
+                  className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                />
+                Select All ({selectedPhraseIds.size}/{sortedExpressions.length})
+              </label>
+            </div>
+
+            <div className="overflow-x-auto bg-white border border-slate-200 rounded-2xl shadow-sm">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th className="w-10 px-4 py-3">
+                      <input 
+                        type="checkbox" 
+                        checked={areAllExpressionsSelected} 
+                        onChange={(e) => toggleAllExpressions(e.target.checked)} 
+                        className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                      />
+                    </th>
+                    <th className="px-4 py-3 text-left">Type</th>
+                    <th className="px-4 py-3 text-left">Expression</th>
+                    <th className="px-4 py-3 text-left">Explanation</th>
+                    <th className="px-4 py-3 text-left">Example sentence</th>
+                    <th className="px-4 py-3 text-left">Date</th>
+                    <th className="px-4 py-3 text-left">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {sortedExpressions.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="px-4 py-6 text-center text-slate-400">No phrases saved yet.</td>
+                    </tr>
+                  ) : (
+                    sortedExpressions.map(item => {
+                      const p = item.data;
+                      const isSelected = selectedPhraseIds.has(p.id);
+                      return (
+                        <tr
+                          key={p.id}
+                          onClick={() => toggleSelection(p.id)}
+                          className={`cursor-pointer ${isSelected ? 'bg-indigo-50/70' : 'hover:bg-slate-50'}`}
+                        >
+                          <td className="px-4 py-3">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleSelection(p.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+                            />
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`text-[11px] font-bold px-2 py-1 rounded uppercase tracking-wider
+                              ${p.type === 'idiom' ? 'bg-purple-100 text-purple-700' : 
+                                p.type === 'slang' ? 'bg-pink-100 text-pink-700' : 'bg-blue-100 text-blue-700'}`}>
+                              {p.type}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <span className="font-semibold text-slate-900">{p.phrase}</span>
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); handlePlayback(`saved-phrase-${p.id}`, p.phrase); }}
+                                className={`p-1.5 rounded-full transition-colors ${
+                                  isActive(`saved-phrase-${p.id}`)
+                                    ? 'bg-indigo-600 text-white shadow-inner'
+                                    : 'text-slate-400 hover:bg-indigo-100 hover:text-indigo-600'
+                                }`}
+                                title="Play audio"
+                              >
+                                {isActive(`saved-phrase-${p.id}`) ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                              </button>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">{p.explanation}</td>
+                          <td className="px-4 py-3 text-slate-500 italic">"{p.example}"</td>
+                          <td className="px-4 py-3 text-slate-500">{formatDate(item.timestamp)}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  openAnkiModal({ type: 'expression', item: { phrase: p.phrase, explanation: p.explanation, example: p.example } }, false);
+                                }}
+                                className="inline-flex items-center justify-center w-8 h-8 rounded-full border border-green-200 text-green-600 hover:bg-green-50 transition-colors"
+                                title="Add to Anki"
+                              >
+                                <Plus className="w-4 h-4" />
+                              </button>
+                              <button 
+                                onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  if (confirm('确定要删除这个短语吗？')) {
+                                    onDeleteSavedItem(p.id, 'expression');
+                                  }
+                                }}
+                                className="inline-flex items-center justify-center w-8 h-8 rounded-full border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
             </div>
           </div>
         )}
 
         {!isFlashcardMode && activeTab === 'feedback' && (
-           <div className="space-y-4 max-w-3xl mx-auto animate-in fade-in duration-300">
-             <div className="flex justify-between items-center pb-2 border-b border-slate-100">
-               <div>
-                 <h3 className="text-lg font-bold text-slate-800">Saved Feedback</h3>
-                 <p className="text-sm text-slate-500">Select feedback to export to Anki.</p>
-               </div>
-               {selectedFeedbackIds.size > 0 && (
-                 <>
-                   <button 
-                     onClick={handleBatchDeleteFeedback} 
-                     className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white font-semibold rounded-lg hover:bg-red-700 shadow-sm transition-all active:scale-95 text-sm"
-                   >
-                     <Trash2 className="w-4 h-4" />
-                     批量删除 ({selectedFeedbackIds.size})
-                   </button>
-                   <button 
-                     onClick={() => openAnkiModal(undefined, true)} 
-                     className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white font-semibold rounded-lg hover:bg-green-700 shadow-sm transition-all active:scale-95 text-sm"
-                   >
-                     <Download className="w-4 h-4" />
-                     Export to Anki ({selectedFeedbackIds.size})
-                   </button>
-                 </>
-               )}
-             </div>
-             {feedback.length === 0 && (
-               <div className="text-center py-12 bg-slate-50 rounded-xl border border-slate-200">
-                 <p className="text-slate-500">No feedback saved yet.</p>
-               </div>
-             )}
-             {feedback.map(f => {
-               const isSelected = selectedFeedbackIds.has(f.id);
-               return (
-                 <div 
-                   key={f.id} 
-                   onClick={() => toggleFeedbackSelection(f.id)}
-                   className={`bg-white p-6 rounded-xl border shadow-sm cursor-pointer transition-all ${
-                     isSelected ? 'border-green-500 ring-1 ring-green-500 bg-green-50/30' : 'border-slate-200 hover:border-green-300'
-                   }`}
-                 >
-                   <div className="flex justify-between items-start mb-4">
-                     <div className="flex items-center gap-2">
-                       <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors
-                         ${isSelected ? 'bg-green-600 border-green-600' : 'border-slate-300 bg-white'}
-                       `}>
-                         {isSelected && <Check className="w-3 h-3 text-white" />}
-                       </div>
-                       <span className="text-xs font-bold text-slate-400">Click to select</span>
-                     </div>
-                     <div className="flex gap-1">
-                       <button 
-                         onClick={(e) => { 
-                           e.stopPropagation(); 
-                           openAnkiModal({ type: 'feedback', item: { original: f.original, improved: f.improved, explanation: f.explanation } }, false);
-                         }}
-                         className="p-1.5 rounded-full text-slate-400 hover:bg-green-100 hover:text-green-600 transition-colors"
-                         title="Add to Anki"
-                       >
-                         <Plus className="w-4 h-4" />
-                       </button>
-                       <button 
-                         onClick={(e) => { 
-                           e.stopPropagation(); 
-                           if (confirm('确定要删除这个反馈吗？')) {
-                             onDeleteSavedItem(f.id, 'feedback');
-                           }
-                         }}
-                         className="p-1.5 rounded-full text-slate-400 hover:bg-red-100 hover:text-red-600 transition-colors"
-                         title="删除"
-                       >
-                         <Trash2 className="w-4 h-4" />
-                       </button>
-                     </div>
-                   </div>
-                   <div className="flex flex-col md:flex-row gap-4 mb-4">
-                     <div className="flex-1 space-y-1">
-                        <span className="text-xs font-bold text-red-500 uppercase">Original</span>
-                        <div className="p-3 bg-red-50 rounded-lg text-red-900 text-sm border border-red-100">{f.original}</div>
-                     </div>
-                     <div className="hidden md:flex items-center justify-center text-slate-300">
-                       <RotateCw className="w-5 h-5 rotate-90" />
-                     </div>
-                     <div className="flex-1 space-y-1">
-                        <div className="flex justify-between items-center">
-                          <span className="text-xs font-bold text-green-600 uppercase">Improved</span>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); playAudio(f.improved); }} 
-                            className="text-green-600 hover:text-green-800"
-                          >
-                            <Volume2 className="w-4 h-4"/>
-                          </button>
-                        </div>
-                        <div className="p-3 bg-green-50 rounded-lg text-green-900 text-sm font-medium border border-green-100">{f.improved}</div>
-                     </div>
-                   </div>
-                   <div className="flex items-start gap-2 text-slate-600 bg-slate-50 p-3 rounded-lg">
-                      <AlertCircle className="w-4 h-4 mt-0.5 text-indigo-500 shrink-0" />
-                      <p className="text-sm italic">{f.explanation}</p>
-                   </div>
-                 </div>
-               );
-             })}
-           </div>
+          <div className="space-y-6 animate-in fade-in duration-300">
+            <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between pb-4 border-b border-slate-100">
+              <div>
+                <h3 className="text-lg font-bold text-slate-800">Saved Feedback</h3>
+                <p className="text-sm text-slate-500">Review, sort, and push corrections directly to Anki.</p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button 
+                  onClick={() => openAnkiModal(undefined, true)} 
+                  disabled={selectedFeedbackIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-green-600 text-white hover:bg-green-700"
+                >
+                  <Download className="w-4 h-4" />
+                  Export Selected
+                </button>
+                <button 
+                  onClick={handleBatchDeleteFeedback} 
+                  disabled={selectedFeedbackIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-red-600 text-white hover:bg-red-700"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Delete Selected
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex gap-2">
+                <button
+                  onClick={() => toggleFeedbackSort('original')}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${feedbackSort.field === 'original' ? 'border-green-500 text-green-600 bg-green-50' : 'border-slate-200 text-slate-500 hover:text-slate-700'}`}
+                >
+                  Original {feedbackSort.field === 'original' ? (feedbackSort.direction === 'asc' ? '↑' : '↓') : '↕'}
+                </button>
+                <button
+                  onClick={() => toggleFeedbackSort('date')}
+                  className={`px-3 py-1.5 rounded-full text-sm border transition-colors ${feedbackSort.field === 'date' ? 'border-green-500 text-green-600 bg-green-50' : 'border-slate-200 text-slate-500 hover:text-slate-700'}`}
+                >
+                  Date {feedbackSort.field === 'date' ? (feedbackSort.direction === 'asc' ? '↑' : '↓') : '↕'}
+                </button>
+              </div>
+              <label className="flex items-center gap-2 text-sm text-slate-600">
+                <input 
+                  type="checkbox" 
+                  checked={areAllFeedbackSelected} 
+                  onChange={(e) => toggleAllFeedback(e.target.checked)} 
+                  className="rounded border-slate-300 text-green-600 focus:ring-green-500"
+                />
+                Select All ({selectedFeedbackIds.size}/{sortedFeedback.length})
+              </label>
+            </div>
+
+            <div className="overflow-x-auto bg-white border border-slate-200 rounded-2xl shadow-sm">
+              <table className="min-w-full divide-y divide-slate-200 text-sm">
+                <thead className="bg-slate-50 text-slate-600 text-xs uppercase tracking-wide">
+                  <tr>
+                    <th className="w-10 px-4 py-3">
+                      <input 
+                        type="checkbox" 
+                        checked={areAllFeedbackSelected} 
+                        onChange={(e) => toggleAllFeedback(e.target.checked)} 
+                        className="rounded border-slate-300 text-green-600 focus:ring-green-500"
+                      />
+                    </th>
+                    <th className="px-4 py-3 text-left">Original</th>
+                    <th className="px-4 py-3 text-left">Improved</th>
+                    <th className="px-4 py-3 text-left">Feedback</th>
+                    <th className="px-4 py-3 text-left">Date</th>
+                    <th className="px-4 py-3 text-left">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 text-slate-700">
+                  {sortedFeedback.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="px-4 py-6 text-center text-slate-400">No feedback saved yet.</td>
+                    </tr>
+                  ) : (
+                    sortedFeedback.map(item => {
+                      const f = item.data;
+                      const isSelected = selectedFeedbackIds.has(f.id);
+                      return (
+                        <tr
+                          key={f.id}
+                          onClick={() => toggleFeedbackSelection(f.id)}
+                          className={`cursor-pointer ${isSelected ? 'bg-green-50/70' : 'hover:bg-slate-50'}`}
+                        >
+                          <td className="px-4 py-3">
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              onChange={() => toggleFeedbackSelection(f.id)}
+                              onClick={(e) => e.stopPropagation()}
+                              className="rounded border-slate-300 text-green-600 focus:ring-green-500"
+                            />
+                          </td>
+                          <td className="px-4 py-3 text-red-600">
+                            <div className="space-y-1">
+                              <span className="text-[11px] font-bold uppercase tracking-wide text-red-400">Original</span>
+                              <p className="bg-red-50 border border-red-100 rounded-lg p-2 text-sm text-red-900">{f.original}</p>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-green-700">
+                            <div className="space-y-1">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] font-bold uppercase tracking-wide text-green-500">Improved</span>
+                                <button 
+                                  onClick={(e) => { e.stopPropagation(); handlePlayback(`feedback-${f.id}`, f.improved); }} 
+                                  className={`p-1 rounded-full transition-colors ${
+                                    isActive(`feedback-${f.id}`)
+                                      ? 'bg-green-600 text-white shadow-inner'
+                                      : 'text-green-600 hover:bg-green-100'
+                                  }`}
+                                  title="Play audio"
+                                >
+                                  {isActive(`feedback-${f.id}`) ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                                </button>
+                              </div>
+                              <p className="bg-green-50 border border-green-100 rounded-lg p-2 text-sm font-medium text-green-900">{f.improved}</p>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-slate-600">
+                            <div className="space-y-1">
+                              <span className="text-[11px] font-bold uppercase tracking-wide text-slate-400">Feedback</span>
+                              <p className="bg-slate-50 border border-slate-100 rounded-lg p-2 text-sm italic flex gap-2">
+                                <AlertCircle className="w-4 h-4 text-indigo-500 shrink-0" />
+                                {f.explanation}
+                              </p>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-slate-500">{formatDate(item.timestamp)}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2">
+                              <button 
+                                onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  openAnkiModal({ type: 'feedback', item: { original: f.original, improved: f.improved, explanation: f.explanation } }, false);
+                                }}
+                                className="inline-flex items-center justify-center w-8 h-8 rounded-full border border-green-200 text-green-600 hover:bg-green-50 transition-colors"
+                                title="Add to Anki"
+                              >
+                                <Plus className="w-4 h-4" />
+                              </button>
+                              <button 
+                                onClick={(e) => { 
+                                  e.stopPropagation(); 
+                                  if (confirm('确定要删除这个反馈吗？')) {
+                                    onDeleteSavedItem(f.id, 'feedback');
+                                  }
+                                }}
+                                className="inline-flex items-center justify-center w-8 h-8 rounded-full border border-red-200 text-red-600 hover:bg-red-50 transition-colors"
+                                title="Delete"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
         )}
 
         {isFlashcardMode && (
@@ -535,10 +769,14 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                          <h2 className="text-4xl font-bold text-slate-800">{flashcards[currentCardIndex].data.phrase}</h2>
                          <div className="absolute bottom-6 flex gap-2 z-10">
                             <button 
-                              onClick={(e) => { e.stopPropagation(); playAudio(flashcards[currentCardIndex].data.phrase); }}
-                              className="p-2 bg-indigo-100 text-indigo-600 rounded-full hover:bg-indigo-200 transition-colors"
+                              onClick={(e) => { e.stopPropagation(); handlePlayback(`flashcard-phrase-${flashcards[currentCardIndex].data.id}`, flashcards[currentCardIndex].data.phrase); }}
+                              className={`p-2 rounded-full transition-colors ${
+                                isActive(`flashcard-phrase-${flashcards[currentCardIndex].data.id}`)
+                                  ? 'bg-indigo-600 text-white shadow-inner'
+                                  : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'
+                              }`}
                             >
-                              <Volume2 className="w-5 h-5" />
+                              {isActive(`flashcard-phrase-${flashcards[currentCardIndex].data.id}`) ? <Pause className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                             </button>
                          </div>
                       </div>
@@ -549,10 +787,14 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                          <div className="bg-slate-700 p-4 rounded-xl text-indigo-200 text-base italic w-full flex justify-between items-center">
                            <span>"{flashcards[currentCardIndex].data.example}"</span>
                            <button 
-                             onClick={(e) => { e.stopPropagation(); playAudio(flashcards[currentCardIndex].data.example); }}
-                             className="p-1 text-indigo-400 hover:text-white"
+                             onClick={(e) => { e.stopPropagation(); handlePlayback(`flashcard-example-${flashcards[currentCardIndex].data.id}`, flashcards[currentCardIndex].data.example); }}
+                             className={`p-1 transition-colors ${
+                               isActive(`flashcard-example-${flashcards[currentCardIndex].data.id}`)
+                                 ? 'text-white'
+                                 : 'text-indigo-400 hover:text-white'
+                             }`}
                            >
-                             <Volume2 className="w-4 h-4" />
+                             {isActive(`flashcard-example-${flashcards[currentCardIndex].data.id}`) ? <Pause className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
                            </button>
                          </div>
                       </div>

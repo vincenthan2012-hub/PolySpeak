@@ -1,14 +1,15 @@
-import React, { useState, useEffect } from 'react';
-import { Mic, ChevronDown, Star, Layers, Settings, Languages, X, Sparkles, Server, Key, Globe, Loader2, BookOpen, Volume2 } from 'lucide-react';
-import { generateScaffold, analyzeAudio, generateSampleSpeech, generateInspirePrompt } from './services/geminiService';
-import { speakText } from './services/audioService';
-import { GraphicData, Expression, AnalysisResult, SavedItem, FeedbackItem, LANGUAGES, LLMConfig, WhisperConfig, Difficulty } from './types';
+import React, { useState, useEffect, useRef } from 'react';
+import { Mic, ChevronDown, Star, Layers, Settings, Languages, X, Sparkles, Server, Key, Globe, Loader2, BookOpen, Volume2, Pause } from 'lucide-react';
+import { generateScaffold, analyzeAudio, generateSampleSpeech, generateInspirePrompt, generateLiveHint, DEFAULT_PROMPT_TEMPLATES } from './services/geminiService';
+import { GraphicData, Expression, AnalysisResult, SavedItem, FeedbackItem, LANGUAGES, LLMConfig, WhisperConfig, Difficulty, PromptSettings } from './types';
 import { getAvailableModels } from './services/whisperService';
 import GraphicOrganizer from './components/GraphicOrganizer';
 import ExpressionList from './components/ExpressionList';
 import AudioRecorder from './components/AudioRecorder';
 import FeedbackDisplay from './components/FeedbackDisplay';
 import ReviewDashboard from './components/ReviewDashboard';
+import { useSpeechPlayback } from './hooks/useSpeechPlayback';
+import StructureOutline from './components/StructureOutline';
 
 enum View {
   PRACTICE = 'practice',
@@ -81,6 +82,25 @@ function App() {
     };
   });
 
+  const [expressionExplanationLang, setExpressionExplanationLang] = useState(() => {
+    const saved = localStorage.getItem('lingua_expression_lang');
+    if (saved) return saved;
+    return nativeLang;
+  });
+
+  const [promptSettings, setPromptSettings] = useState<PromptSettings>(() => {
+    const saved = localStorage.getItem('lingua_prompt_settings');
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        return { ...DEFAULT_PROMPT_TEMPLATES, ...parsed };
+      } catch {
+        return { ...DEFAULT_PROMPT_TEMPLATES };
+      }
+    }
+    return { ...DEFAULT_PROMPT_TEMPLATES };
+  });
+
   // Save configs when changed
   useEffect(() => {
     localStorage.setItem('lingua_llm_config', JSON.stringify(llmConfig));
@@ -94,6 +114,14 @@ function App() {
     localStorage.setItem('lingua_whisper_config', JSON.stringify(whisperConfig));
   }, [whisperConfig]);
 
+  useEffect(() => {
+    localStorage.setItem('lingua_prompt_settings', JSON.stringify(promptSettings));
+  }, [promptSettings]);
+
+  useEffect(() => {
+    localStorage.setItem('lingua_expression_lang', expressionExplanationLang);
+  }, [expressionExplanationLang]);
+
   // Save language settings when changed
   useEffect(() => {
     localStorage.setItem('lingua_target_lang', targetLang);
@@ -103,12 +131,22 @@ function App() {
     localStorage.setItem('lingua_native_lang', nativeLang);
   }, [nativeLang]);
 
+  const prevNativeLangRef = useRef(nativeLang);
+  useEffect(() => {
+    if (expressionExplanationLang === prevNativeLangRef.current) {
+      setExpressionExplanationLang(nativeLang);
+    }
+    prevNativeLangRef.current = nativeLang;
+  }, [nativeLang, expressionExplanationLang]);
+
   // Practice State
   const [topic, setTopic] = useState('');
+  const topicInputRef = useRef<HTMLTextAreaElement | null>(null);
   const [expressionCount, setExpressionCount] = useState<number>(5);
   const [difficulty, setDifficulty] = useState<Difficulty>('intermediate');
   const [isLoadingScaffold, setIsLoadingScaffold] = useState(false);
   const [scaffoldData, setScaffoldData] = useState<{structure: GraphicData, expressions: Expression[]} | null>(null);
+  const [structureViewMode, setStructureViewMode] = useState<'graphic' | 'outline'>('graphic');
   const [isGeneratingPrompt, setIsGeneratingPrompt] = useState(false);
   const [promptHistory, setPromptHistory] = useState<string[]>(() => {
     try {
@@ -129,6 +167,12 @@ function App() {
   // Analysis State
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const { togglePlayback: toggleSamplePlayback, isActive: isSampleActive } = useSpeechPlayback();
+
+  // Live Hint State
+  const [liveHint, setLiveHint] = useState<{ type: 'question' | 'hint'; message: string } | null>(null);
+  const [isGeneratingHint, setIsGeneratingHint] = useState(false);
+  const hintCooldownRef = useRef<number>(0);
 
   // Saved Data
   const [savedItems, setSavedItems] = useState<SavedItem[]>(() => {
@@ -143,6 +187,16 @@ function App() {
   useEffect(() => {
     localStorage.setItem('lingua_prompt_history', JSON.stringify(promptHistory.slice(0, MAX_PROMPT_HISTORY)));
   }, [promptHistory]);
+
+  const adjustTopicTextareaHeight = (textarea: HTMLTextAreaElement | null) => {
+    if (!textarea) return;
+    textarea.style.height = 'auto';
+    textarea.style.height = `${Math.max(textarea.scrollHeight, 64)}px`;
+  };
+
+  useEffect(() => {
+    adjustTopicTextareaHeight(topicInputRef.current);
+  }, [topic]);
 
   const savedPhrases = new Set(
     savedItems.filter(i => i.type === 'expression').map(i => (i.data as Expression).id)
@@ -175,6 +229,15 @@ function App() {
   };
 
   // Handlers
+  const handleTopicInput = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
+    adjustTopicTextareaHeight(event.currentTarget);
+    setTopic(event.target.value);
+  };
+
+  const handlePromptChange = (key: keyof PromptSettings, value: string) => {
+    setPromptSettings(prev => ({ ...prev, [key]: value }));
+  };
+
   const handleGenerateScaffold = async () => {
     if (!topic.trim()) return;
     setIsLoadingScaffold(true);
@@ -183,7 +246,15 @@ function App() {
     setShowSampleModal(false);
     setAnalysisResult(null);
     try {
-      const data = await generateScaffold(topic, expressionCount, targetLang, nativeLang, llmConfig, difficulty);
+      const data = await generateScaffold(
+        topic,
+        expressionCount,
+        targetLang,
+        nativeLang,
+        expressionExplanationLang,
+        llmConfig,
+        difficulty
+      );
       setScaffoldData(data);
     } catch (error) {
       console.error('Error generating scaffold:', error);
@@ -203,7 +274,7 @@ function App() {
     setIsGeneratingSample(true);
     try {
         const phrases = scaffoldData.expressions.map(e => e.phrase);
-        const text = await generateSampleSpeech(topic, phrases, targetLang, llmConfig);
+        const text = await generateSampleSpeech(topic, phrases, targetLang, llmConfig, promptSettings.sample);
         setSampleSpeech(text);
         setShowSampleModal(true);
     } catch (e) {
@@ -218,7 +289,7 @@ function App() {
     if (isGeneratingPrompt) return;
     setIsGeneratingPrompt(true);
     try {
-      const prompt = await generateInspirePrompt(difficulty, promptHistory, llmConfig);
+      const prompt = await generateInspirePrompt(difficulty, promptHistory, llmConfig, promptSettings.inspire);
       const cleanPrompt = prompt.trim();
       if (cleanPrompt) {
         setTopic(cleanPrompt);
@@ -235,7 +306,9 @@ function App() {
     }
   };
 
-  const handleAudioCaptured = async (base64: string) => {
+  const handleAudioCaptured = async (base64: string, mimeType: string) => {
+    const safeMime = mimeType || 'audio/webm';
+    const dataUrl = `data:${safeMime};base64,${base64}`;
     setIsAnalyzing(true);
     try {
       // Get language code for Whisper (e.g., 'es' from 'es-ES')
@@ -244,14 +317,35 @@ function App() {
         ...whisperConfig,
         language: whisperConfig.language || whisperLangCode
       };
-      const result = await analyzeAudio(base64, targetLang, nativeLang, llmConfig, whisperConfigWithLang);
-      setAnalysisResult(result);
+      const result = await analyzeAudio(base64, targetLang, nativeLang, llmConfig, whisperConfigWithLang, promptSettings.feedback);
+      setAnalysisResult({ ...result, audioUrl: dataUrl, audioMimeType: safeMime });
     } catch (error) {
       console.error('Error analyzing audio:', error);
       alert(`分析失败:\n\n${formatError(error)}`);
     } finally {
       setIsAnalyzing(false);
     }
+  };
+
+  const handleRecordingStall = async () => {
+    if (!topic.trim() || isGeneratingHint) return;
+    const now = Date.now();
+    if (now - hintCooldownRef.current < 15000) return;
+    setIsGeneratingHint(true);
+    try {
+      const hint = await generateLiveHint(topic, difficulty, llmConfig, promptSettings.liveHint);
+      setLiveHint(hint);
+      hintCooldownRef.current = now;
+    } catch (error) {
+      console.error('Error generating live hint:', error);
+    } finally {
+      setIsGeneratingHint(false);
+    }
+  };
+
+  const handleRecordingResume = () => {
+    setLiveHint(null);
+    setIsGeneratingHint(false);
   };
 
   const togglePhraseFavorite = (expr: Expression) => {
@@ -326,12 +420,10 @@ function App() {
     setSavedLlmModels(prev => prev.filter(m => !(m.provider === provider && m.model === modelName)));
   };
 
-  const playAudio = (text: string) => {
+  const handleSamplePlayback = (text: string) => {
     if (!text) return;
     const cleanText = text.replace(/\*\*/g, '');
-    speakText(cleanText, { lang: targetLang }).catch((error) => {
-      console.error('Speech synthesis failed:', error);
-    });
+    toggleSamplePlayback('sample-speech', cleanText, { lang: targetLang });
   };
 
   const renderHighlightedText = (text: string) => {
@@ -343,6 +435,34 @@ function App() {
       return part;
     });
   };
+
+  const promptFieldMeta: { key: keyof PromptSettings; label: string; helper: string }[] = [
+    {
+      key: 'inspire',
+      label: 'Inspire Me',
+      helper: 'Placeholders: {{level}}, {{promptTypes}}, {{history}}'
+    },
+    {
+      key: 'liveHint',
+      label: 'AI Hint',
+      helper: 'Placeholders: {{topic}}, {{difficulty}}'
+    },
+    {
+      key: 'story',
+      label: 'Generate Story',
+      helper: 'Placeholders: {{targetLang}}, {{phrases}}'
+    },
+    {
+      key: 'feedback',
+      label: 'Feedback',
+      helper: 'Placeholders: {{targetLang}}, {{nativeLang}}, {{transcription}}'
+    },
+    {
+      key: 'sample',
+      label: 'Show Sample',
+      helper: 'Placeholders: {{topic}}, {{targetLang}}, {{phrases}}, {{minCount}}'
+    }
+  ];
 
   const NavigationContent = () => (
     <nav className="space-y-2">
@@ -417,6 +537,21 @@ function App() {
                     </select>
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-indigo-400 pointer-events-none" />
                   </div>
+                </div>
+
+                <div className="col-span-2">
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Expression Explanations</label>
+                  <div className="relative">
+                    <select
+                      value={expressionExplanationLang}
+                      onChange={(e) => setExpressionExplanationLang(e.target.value)}
+                      className="w-full pl-3 pr-8 py-2 bg-white border border-slate-200 rounded-lg text-sm font-medium text-slate-700 focus:ring-2 focus:ring-indigo-100 outline-none appearance-none"
+                    >
+                      {LANGUAGES.map(l => <option key={`expr-${l.code}`} value={l.code}>{l.name}</option>)}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 pointer-events-none" />
+                  </div>
+                  <p className="text-[10px] text-slate-500 mt-1">Choose the language used for expression explanations.</p>
                 </div>
               </div>
             </div>
@@ -607,6 +742,33 @@ function App() {
               </div>
             </div>
 
+            {/* Prompt Templates */}
+            <div className="space-y-4 mt-8">
+              <h4 className="text-sm font-bold text-rose-600 uppercase tracking-wider border-b border-slate-100 pb-2 mb-2 flex items-center gap-2">
+                <Sparkles className="w-4 h-4" />
+                Prompt Templates
+              </h4>
+              <p className="text-xs text-slate-500">
+                Adjust the instructions sent to the AI. Use the placeholders shown for each template (e.g., <span className="font-mono text-[11px] bg-slate-100 px-1 rounded">{'{{topic}}'}</span>).
+              </p>
+              <div className="space-y-4">
+                {promptFieldMeta.map((field) => (
+                  <div key={field.key} className="space-y-2">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">{field.label}</span>
+                      <span className="text-[10px] text-slate-400">{field.helper}</span>
+                    </div>
+                    <textarea
+                      value={promptSettings[field.key]}
+                      onChange={(e) => handlePromptChange(field.key, e.target.value)}
+                      rows={5}
+                      className="w-full text-sm font-mono bg-slate-50 border border-slate-200 rounded-lg p-3 focus:ring-2 focus:ring-indigo-100 focus:border-indigo-300 resize-vertical"
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+
             <div className="mt-8 pt-6 border-t border-slate-100">
               <button 
                 onClick={() => setShowSettings(false)}
@@ -642,13 +804,15 @@ function App() {
                  </div>
                </div>
 
-               <div className="flex justify-end pt-4 border-t border-slate-100">
+              <div className="flex justify-end pt-4 border-t border-slate-100">
                   <button 
-                    onClick={() => playAudio(sampleSpeech)}
-                    className="flex items-center gap-2 px-5 py-2.5 bg-indigo-600 text-white rounded-xl font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 transition-all active:scale-95"
+                    onClick={() => handleSamplePlayback(sampleSpeech)}
+                    className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-bold shadow-lg shadow-indigo-200 transition-all active:scale-95 ${
+                      isSampleActive('sample-speech') ? 'bg-slate-900 text-white' : 'bg-indigo-600 text-white hover:bg-indigo-700'
+                    }`}
                   >
-                    <Volume2 className="w-5 h-5" />
-                    Listen to Sample
+                    {isSampleActive('sample-speech') ? <Pause className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
+                    {isSampleActive('sample-speech') ? 'Pause Sample' : 'Listen to Sample'}
                   </button>
                </div>
             </div>
@@ -731,23 +895,27 @@ function App() {
                       <div className="flex-1 w-full space-y-3">
                         <div className="flex items-center justify-between">
                           <label className="block text-sm font-bold text-slate-700 pl-1">Topic</label>
+                        </div>
+                        <div className="relative">
+                          <textarea
+                            ref={topicInputRef}
+                            rows={1}
+                            value={topic}
+                            onChange={handleTopicInput}
+                            placeholder="What would you like to practice talking about?"
+                            className="w-full px-6 pr-32 py-4 text-lg bg-slate-50 rounded-2xl border-2 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all outline-none placeholder:text-slate-400 font-medium resize-none overflow-hidden"
+                            style={{ minHeight: '64px', height: topic ? undefined : '64px' }}
+                          />
                           <button
                             type="button"
                             onClick={handleInspireMe}
                             disabled={isGeneratingPrompt}
-                            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl border border-indigo-100 text-indigo-600 bg-indigo-50 hover:bg-white transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                            className="absolute top-1/2 right-3 -translate-y-1/2 inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold rounded-xl border border-indigo-100 text-indigo-600 bg-white/90 hover:bg-white transition-all disabled:opacity-60 disabled:cursor-not-allowed shadow-sm"
                           >
                             {isGeneratingPrompt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Sparkles className="w-4 h-4" />}
                             Inspire Me
                           </button>
                         </div>
-                        <input 
-                          type="text" 
-                          value={topic}
-                          onChange={(e) => setTopic(e.target.value)}
-                          placeholder="What would you like to practice talking about?"
-                          className="w-full px-6 py-4 text-lg bg-slate-50 rounded-2xl border-2 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 transition-all outline-none placeholder:text-slate-400 font-medium"
-                        />
                       </div>
                       
                       {/* Controls Group */}
@@ -781,7 +949,9 @@ function App() {
                               className="w-full px-5 py-4 text-lg bg-slate-50 rounded-2xl border-2 border-transparent focus:bg-white focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/10 outline-none font-medium text-slate-700 appearance-none"
                             >
                               <option value="beginner">Beginner</option>
+                            <option value="pre-intermediate">Pre-intermediate</option>
                               <option value="intermediate">Intermediate</option>
+                            <option value="upper-intermediate">Upper-intermediate</option>
                               <option value="advanced">Advanced</option>
                             </select>
                             <ChevronDown className="absolute right-4 top-1/2 -translate-y-1/2 w-5 h-5 text-slate-400 pointer-events-none" />
@@ -810,22 +980,44 @@ function App() {
                     
                     {/* Left Column: Structure (7 columns) */}
                     <div className="lg:col-span-7 space-y-6 min-w-0">
-                       <div className="flex items-center justify-between px-1">
+                      <div className="flex items-center justify-between px-1 gap-3 flex-wrap">
                           <h2 className="text-xl font-bold text-slate-800 flex items-center gap-2">
                             <div className="w-2 h-6 bg-indigo-500 rounded-full"></div>
                             Speaking Structure
                           </h2>
-                          {scaffoldData.structure.type && (
-                            <span className="text-[10px] font-bold px-3 py-1 bg-white border border-indigo-100 text-indigo-600 rounded-full uppercase tracking-wider shadow-sm">
-                              {scaffoldData.structure.type}
-                            </span>
-                          )}
+                          <div className="flex items-center gap-3">
+                            {scaffoldData.structure.type && (
+                              <span className="text-[10px] font-bold px-3 py-1 bg-white border border-indigo-100 text-indigo-600 rounded-full uppercase tracking-wider shadow-sm">
+                                {scaffoldData.structure.type}
+                              </span>
+                            )}
+                            <div className="bg-slate-100 rounded-full p-1 flex text-xs font-semibold text-slate-500">
+                              <button
+                                type="button"
+                                onClick={() => setStructureViewMode('graphic')}
+                                className={`px-3 py-1.5 rounded-full transition-colors ${structureViewMode === 'graphic' ? 'bg-white text-indigo-600 shadow-sm' : 'hover:text-slate-700'}`}
+                              >
+                                Graphic
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setStructureViewMode('outline')}
+                                className={`px-3 py-1.5 rounded-full transition-colors ${structureViewMode === 'outline' ? 'bg-white text-indigo-600 shadow-sm' : 'hover:text-slate-700'}`}
+                              >
+                                Outline
+                              </button>
+                            </div>
+                          </div>
                        </div>
                        
                        {/* Graphic Organizer Container - "Picture Frame" look */}
-                       <div className="rounded-xl overflow-hidden shadow-md border border-slate-200 bg-white">
-                          <GraphicOrganizer data={scaffoldData.structure} />
-                       </div>
+                       {structureViewMode === 'graphic' ? (
+                         <div className="rounded-xl overflow-hidden shadow-md border border-slate-200 bg-white">
+                            <GraphicOrganizer data={scaffoldData.structure} />
+                         </div>
+                       ) : (
+                         <StructureOutline data={scaffoldData.structure} />
+                       )}
                     </div>
 
                     {/* Right Column: Expressions (5 columns) */}
@@ -869,11 +1061,11 @@ function App() {
                        <Sparkles className="w-6 h-6 text-indigo-500" />
                        Feedback & Correction
                      </h2>
-                     <FeedbackDisplay 
-                       result={analysisResult} 
-                       savedFeedbackIds={savedFeedbackIds}
-                       onSaveFeedback={saveFeedback}
-                     />
+                      <FeedbackDisplay 
+                        result={analysisResult} 
+                        savedFeedbackIds={savedFeedbackIds}
+                        onSaveFeedback={saveFeedback}
+                      />
                   </section>
                 )}
 
@@ -886,15 +1078,46 @@ function App() {
                 onDeleteSavedItems={deleteSavedItems}
                 mode={view === View.FLASHCARDS ? 'flashcards' : 'favorites'}
                 targetLang={targetLang}
+                llmConfig={llmConfig}
+                promptSettings={promptSettings}
               />
             )}
           </div>
           
           {/* Sticky Recorder at Bottom - Available only in Practice View */}
-          {view === View.PRACTICE && scaffoldData && (
+          {view === View.PRACTICE && (
             <div className="fixed bottom-20 md:bottom-6 left-0 right-0 z-40 flex justify-center px-4 pointer-events-none">
-               <div className="pointer-events-auto animate-in slide-in-from-bottom-4 fade-in duration-500">
-                  <AudioRecorder onAudioCaptured={handleAudioCaptured} isAnalyzing={isAnalyzing} />
+               <div className="w-full max-w-xl pointer-events-auto animate-in slide-in-from-bottom-4 fade-in duration-500 space-y-3">
+                 {(isGeneratingHint || liveHint) && (
+                   <div className="flex justify-center">
+                     <div className="bg-slate-900/90 text-white px-4 py-3 rounded-2xl shadow-xl flex items-start gap-3 w-full">
+                        <div className="w-8 h-8 rounded-full bg-indigo-500/40 flex items-center justify-center mt-0.5">
+                          <Sparkles className="w-4 h-4 text-white" />
+                        </div>
+                        <div className="flex-1">
+                          <p className="text-[10px] uppercase tracking-[0.2em] text-indigo-200 font-semibold mb-1">
+                            {liveHint ? (liveHint.type === 'question' ? 'AI Question' : 'AI Hint') : 'AI Coach'}
+                          </p>
+                          <p className="text-sm leading-snug">
+                            {liveHint ? liveHint.message : 'Thinking of the next nudge...'}
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setLiveHint(null)}
+                          className="text-white/60 hover:text-white transition-colors"
+                          aria-label="Close hint"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                     </div>
+                   </div>
+                 )}
+                 <AudioRecorder 
+                   onAudioCaptured={handleAudioCaptured} 
+                   isAnalyzing={isAnalyzing} 
+                   onStallDetected={handleRecordingStall}
+                   onSpeechResumed={handleRecordingResume}
+                 />
                </div>
             </div>
           )}

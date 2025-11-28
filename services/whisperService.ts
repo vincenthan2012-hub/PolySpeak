@@ -12,6 +12,20 @@ env.useCustomCache = true;
 let whisperPipeline: any = null;
 let currentModel: string | null = null;
 
+const waitForDocumentVisible = async () => {
+  if (typeof document === 'undefined') return;
+  if (!document.hidden) return;
+  await new Promise<void>((resolve) => {
+    const handle = () => {
+      if (!document.hidden) {
+        document.removeEventListener('visibilitychange', handle);
+        resolve();
+      }
+    };
+    document.addEventListener('visibilitychange', handle, { passive: true });
+  });
+};
+
 /**
  * Initialize Whisper pipeline with the specified model
  */
@@ -103,7 +117,15 @@ const convertWebmToWav = async (webmData: ArrayBuffer): Promise<ArrayBuffer> => 
     console.log('[Whisper] Converting audio format, size:', webmData.byteLength, 'bytes');
     
     // Create an AudioContext to decode the audio
+    await waitForDocumentVisible();
     const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (audioContext.state === 'suspended') {
+      try {
+        await audioContext.resume();
+      } catch (resumeError) {
+        console.warn('[Whisper] Failed to resume AudioContext:', resumeError);
+      }
+    }
     
     // Check if audio is valid
     if (webmData.byteLength === 0) {
@@ -224,7 +246,15 @@ export const transcribeAudio = async (
     // Decode audio first to get AudioBuffer
     let audioBuffer: AudioBuffer;
     try {
+      await waitForDocumentVisible();
       const audioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+      if (audioContext.state === 'suspended') {
+        try {
+          await audioContext.resume();
+        } catch (resumeError) {
+          console.warn('[Whisper] Failed to resume AudioContext:', resumeError);
+        }
+      }
       audioBuffer = await audioContext.decodeAudioData(audioArrayBuffer.slice(0));
       console.log('[Whisper] Audio decoded:', {
         sampleRate: audioBuffer.sampleRate,
