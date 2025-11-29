@@ -204,3 +204,99 @@ export const generateAudioFileName = (text: string, index?: number): string => {
   return `audio_${Math.abs(hash)}${index !== undefined ? `_${index}` : ''}.mp3`;
 };
 
+const createWavFromAudioBuffer = (audioBuffer: AudioBuffer): ArrayBuffer => {
+  const numChannels = audioBuffer.numberOfChannels || 1;
+  const sampleRate = audioBuffer.sampleRate;
+  const bitsPerSample = 16;
+  const blockAlign = numChannels * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const dataSize = audioBuffer.length * blockAlign;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  // WAV header
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // Subchunk1Size
+  view.setUint16(20, 1, true); // AudioFormat PCM
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, byteRate, true);
+  view.setUint16(32, blockAlign, true);
+  view.setUint16(34, bitsPerSample, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  // PCM samples interleaved
+  let offset = 44;
+  for (let i = 0; i < audioBuffer.length; i++) {
+    for (let channel = 0; channel < numChannels; channel++) {
+      const channelData = audioBuffer.getChannelData(channel);
+      const sample = Math.max(-1, Math.min(1, channelData[i] || 0));
+      view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
+      offset += 2;
+    }
+  }
+
+  return buffer;
+};
+
+/**
+ * Clip a segment from an audio data URL (client-side)
+ */
+export const clipAudioSegmentFromDataUrl = async (
+  dataUrl: string,
+  startSeconds: number,
+  endSeconds: number
+): Promise<{ dataUrl: string; mimeType: string; duration: number }> => {
+  if (typeof window === 'undefined' || !(window.AudioContext || (window as any).webkitAudioContext)) {
+    throw new Error('AudioContext is not available in this environment.');
+  }
+  if (!dataUrl?.startsWith('data:audio')) {
+    throw new Error('Unsupported audio source. Expected base64 data URL.');
+  }
+  const response = await fetch(dataUrl);
+  const arrayBuffer = await response.arrayBuffer();
+  const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+  const audioContext = new AudioCtx();
+  try {
+    const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+    const safeStart = Math.max(0, Math.min(startSeconds ?? 0, decoded.duration));
+    const safeEnd = Math.max(safeStart + 0.05, Math.min(endSeconds ?? decoded.duration, decoded.duration));
+
+    const startSample = Math.floor(safeStart * decoded.sampleRate);
+    const endSample = Math.ceil(safeEnd * decoded.sampleRate);
+    const frameCount = Math.max(endSample - startSample, Math.floor(decoded.sampleRate * 0.05));
+
+    const clippedBuffer = audioContext.createBuffer(decoded.numberOfChannels, frameCount, decoded.sampleRate);
+    for (let channel = 0; channel < decoded.numberOfChannels; channel++) {
+      const sourceChannel = decoded.getChannelData(channel);
+      const slice = sourceChannel.subarray(startSample, Math.min(endSample, sourceChannel.length));
+      clippedBuffer.copyToChannel(slice, channel, 0);
+    }
+
+    const wavBuffer = createWavFromAudioBuffer(clippedBuffer);
+    const mimeType = 'audio/wav';
+    const blob = new Blob([wavBuffer], { type: mimeType });
+    const clippedDataUrl = await audioBlobToDataUrl(blob);
+
+    return {
+      dataUrl: clippedDataUrl,
+      mimeType,
+      duration: Math.max(0, safeEnd - safeStart)
+    };
+  } finally {
+    if (typeof audioContext.close === 'function') {
+      await audioContext.close();
+    }
+  }
+};
+

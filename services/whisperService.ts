@@ -1,5 +1,5 @@
 import { pipeline, env } from '@xenova/transformers';
-import { WhisperConfig } from '../types';
+import { WhisperConfig, WhisperTranscription, WhisperSegment } from '../types';
 
 // Configure transformers for browser environment
 env.allowLocalModels = false;
@@ -204,20 +204,94 @@ const convertWebmToWav = async (webmData: ArrayBuffer): Promise<ArrayBuffer> => 
 };
 
 /**
- * Extract transcription from pipeline result
+ * Normalize chunk text spacing
  */
-const extractTranscription = (result: any): string => {
+const sanitizeChunkText = (text: string | undefined): string => {
+  if (!text || typeof text !== 'string') return '';
+  return text.replace(/\s+/g, ' ').trim();
+};
+
+/**
+ * Convert Whisper chunks/segments to timeline info
+ */
+const buildSegmentsFromResult = (result: any): WhisperSegment[] => {
+  const rawChunks = Array.isArray(result?.chunks)
+    ? result.chunks
+    : Array.isArray(result?.segments)
+      ? result.segments
+      : [];
+
+  if (!rawChunks.length) return [];
+
+  return rawChunks
+    .map((chunk: any, index: number) => {
+      const text = sanitizeChunkText(chunk?.text || chunk?.sentence);
+      if (!text) return null;
+
+      let start: number | undefined;
+      let end: number | undefined;
+      const timestamp = Array.isArray(chunk?.timestamp)
+        ? chunk.timestamp
+        : Array.isArray(chunk?.timestamps)
+          ? chunk.timestamps
+          : null;
+
+      if (timestamp) {
+        start = typeof timestamp[0] === 'number' ? timestamp[0] : undefined;
+        end = typeof timestamp[1] === 'number' ? timestamp[1] : undefined;
+      } else {
+        start = typeof chunk?.start === 'number' ? chunk.start : undefined;
+        end = typeof chunk?.end === 'number' ? chunk.end : undefined;
+      }
+
+      if (start !== undefined && end === undefined && typeof chunk?.duration === 'number') {
+        end = start + chunk.duration;
+      }
+
+      if (start === undefined && typeof chunk?.offset === 'number') {
+        start = chunk.offset;
+      }
+
+      return {
+        id: chunk?.id ? String(chunk.id) : `chunk-${index}`,
+        text,
+        start,
+        end
+      } as WhisperSegment;
+    })
+    .filter((segment): segment is WhisperSegment => Boolean(segment));
+};
+
+/**
+ * Extract transcription and segments from pipeline result
+ */
+const extractTranscriptionResult = (result: any): WhisperTranscription => {
+  if (!result) return { text: '', segments: [] };
+
   if (typeof result === 'string') {
-    return result.trim();
+    return { text: result.trim(), segments: [] };
   }
-  if (result?.text) {
-    return result.text.trim();
+
+  const directText = sanitizeChunkText(result.text);
+  const chunkText = Array.isArray(result?.chunks)
+    ? result.chunks
+        .map((chunk: any) => sanitizeChunkText(chunk?.text))
+        .filter(Boolean)
+        .join(' ')
+        .trim()
+    : '';
+
+  const text = directText || chunkText;
+  const segments = buildSegmentsFromResult(result);
+
+  if (!text && !segments.length) {
+    console.warn('[Whisper] Unexpected result format:', result);
   }
-  if (result?.chunks && Array.isArray(result.chunks)) {
-    return result.chunks.map((chunk: any) => chunk.text || '').join(' ').trim();
-  }
-  console.warn('[Whisper] Unexpected result format:', result);
-  return '';
+
+  return {
+    text,
+    segments
+  };
 };
 
 /**
@@ -229,7 +303,7 @@ const extractTranscription = (result: any): string => {
 export const transcribeAudio = async (
   audioBase64: string,
   config: WhisperConfig
-): Promise<string> => {
+): Promise<WhisperTranscription> => {
   if (!config.enabled) {
     throw new Error('Whisper is not enabled');
   }
@@ -271,9 +345,24 @@ export const transcribeAudio = async (
       throw new Error(`Failed to decode audio: ${decodeError instanceof Error ? decodeError.message : 'Unknown error'}`);
     }
     
-    // Try multiple approaches to transcribe
-    let transcription = '';
+    // Helper to invoke Whisper pipeline with consistent settings
+    const invokePipeline = async (input: string | File): Promise<WhisperTranscription> => {
+      const transcriptionPromise = pipeline(input, {
+        language: config.language || null,
+        task: 'transcribe',
+        chunk_length_s: 30,
+        return_timestamps: true,
+      });
+
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Timeout')), 60000);
+      });
+
+      const result = await Promise.race([transcriptionPromise, timeoutPromise]) as any;
+      return extractTranscriptionResult(result);
+    };
     
+    // Try multiple approaches to transcribe
     // Approach 1: Convert to WAV and use blob URL
     try {
       console.log('[Whisper] Attempting WAV conversion approach...');
@@ -282,24 +371,10 @@ export const transcribeAudio = async (
       const audioUrl = URL.createObjectURL(audioBlob);
       
       try {
-        const transcriptionPromise = pipeline(audioUrl, {
-          language: config.language || null,
-          task: 'transcribe',
-          chunk_length_s: 30,
-          return_timestamps: false,
-        });
-        
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Timeout')), 60000);
-        });
-        
-        const result = await Promise.race([transcriptionPromise, timeoutPromise]) as any;
-        transcription = extractTranscription(result);
-        
-        if (transcription) {
-          URL.revokeObjectURL(audioUrl);
-          console.log('[Whisper] Transcription successful with WAV format:', transcription.substring(0, 50));
-          return transcription;
+        const transcriptionResult = await invokePipeline(audioUrl);
+        if (transcriptionResult.text) {
+          console.log('[Whisper] Transcription successful with WAV format:', transcriptionResult.text.substring(0, 50));
+          return transcriptionResult;
         }
       } catch (pipelineError) {
         console.warn('[Whisper] Pipeline call failed:', pipelineError);
@@ -318,24 +393,10 @@ export const transcribeAudio = async (
       const originalUrl = URL.createObjectURL(originalBlob);
       
       try {
-        const transcriptionPromise = pipeline(originalUrl, {
-          language: config.language || null,
-          task: 'transcribe',
-          chunk_length_s: 30,
-          return_timestamps: false,
-        });
-        
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Timeout')), 60000);
-        });
-        
-        const result = await Promise.race([transcriptionPromise, timeoutPromise]) as any;
-        transcription = extractTranscription(result);
-        
-        if (transcription) {
-          URL.revokeObjectURL(originalUrl);
-          console.log('[Whisper] Transcription successful with WebM format:', transcription.substring(0, 50));
-          return transcription;
+        const transcriptionResult = await invokePipeline(originalUrl);
+        if (transcriptionResult.text) {
+          console.log('[Whisper] Transcription successful with WebM format:', transcriptionResult.text.substring(0, 50));
+          return transcriptionResult;
         }
       } finally {
         URL.revokeObjectURL(originalUrl);
@@ -350,23 +411,10 @@ export const transcribeAudio = async (
       const audioBlob = new Blob([audioArrayBuffer], { type: 'audio/webm' });
       const audioFile = new File([audioBlob], 'audio.webm', { type: 'audio/webm' });
       
-      const transcriptionPromise = pipeline(audioFile, {
-        language: config.language || null,
-        task: 'transcribe',
-        chunk_length_s: 30,
-        return_timestamps: false,
-      });
-      
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error('Timeout')), 60000);
-      });
-      
-      const result = await Promise.race([transcriptionPromise, timeoutPromise]) as any;
-      transcription = extractTranscription(result);
-      
-      if (transcription) {
-        console.log('[Whisper] Transcription successful with File object:', transcription.substring(0, 50));
-        return transcription;
+      const transcriptionResult = await invokePipeline(audioFile);
+      if (transcriptionResult.text) {
+        console.log('[Whisper] Transcription successful with File object:', transcriptionResult.text.substring(0, 50));
+        return transcriptionResult;
       }
     } catch (fileError) {
       console.warn('[Whisper] File object approach failed:', fileError);

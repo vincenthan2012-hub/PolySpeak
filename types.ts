@@ -25,6 +25,11 @@ export interface FeedbackItem {
   original: string;
   improved: string;
   explanation: string;
+  audioStart?: number;
+  audioEnd?: number;
+  audioClipUrl?: string;
+  audioClipMimeType?: string;
+  audioClipDuration?: number;
 }
 
 export interface OverallFeedback {
@@ -42,6 +47,8 @@ export interface AnalysisResult {
   overallFeedback?: OverallFeedback;
   audioUrl?: string;
   audioMimeType?: string;
+  sentenceTimings?: SentenceTiming[];
+  transcriptionSegments?: WhisperSegment[];
 }
 
 export type Difficulty = 'beginner' | 'pre-intermediate' | 'intermediate' | 'upper-intermediate' | 'advanced';
@@ -77,6 +84,24 @@ export interface WhisperConfig {
   enabled: boolean;
   model: 'tiny' | 'base' | 'small' | 'medium' | 'large' | 'large-v2' | 'large-v3';
   language?: string; // Optional language code (e.g., 'en', 'es', 'zh')
+}
+
+export interface WhisperSegment {
+  id: string;
+  text: string;
+  start?: number;
+  end?: number;
+}
+
+export interface WhisperTranscription {
+  text: string;
+  segments: WhisperSegment[];
+}
+
+export interface SentenceTiming {
+  text: string;
+  start?: number;
+  end?: number;
 }
 
 export interface PromptSettings {

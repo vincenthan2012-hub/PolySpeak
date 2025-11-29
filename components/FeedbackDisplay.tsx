@@ -4,13 +4,15 @@ import { CheckCircle, AlertTriangle, BookmarkPlus, Award, PlayCircle, PauseCircl
 
 interface Props {
   result: AnalysisResult;
-  onSaveFeedback: (item: FeedbackItem) => void;
+  onSaveFeedback: (item: FeedbackItem) => Promise<void> | void;
   savedFeedbackIds: Set<string>;
 }
 
 const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbackIds }) => {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const segmentEndRef = useRef<number | null>(null);
   const [isAudioPlaying, setIsAudioPlaying] = useState(false);
+  const [activeSegmentId, setActiveSegmentId] = useState<string | null>(null);
   const downloadFileName = useMemo(() => {
     if (result.audioMimeType && result.audioMimeType.includes('mpeg')) {
       return 'polyspeak-recording.mp3';
@@ -20,6 +22,8 @@ const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbac
 
   const togglePlayback = () => {
     if (!audioRef.current) return;
+    segmentEndRef.current = null;
+    setActiveSegmentId(null);
     if (audioRef.current.paused) {
       audioRef.current.play().catch(() => undefined);
     } else {
@@ -28,8 +32,37 @@ const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbac
   };
 
   const handleAudioPlay = () => setIsAudioPlaying(true);
-  const handleAudioPause = () => setIsAudioPlaying(false);
+  const handleAudioPause = () => {
+    setIsAudioPlaying(false);
+    segmentEndRef.current = null;
+    setActiveSegmentId(null);
+  };
   const handleAudioEnded = () => setIsAudioPlaying(false);
+
+  const handleAudioTimeUpdate = () => {
+    if (!audioRef.current) return;
+    if (segmentEndRef.current == null) return;
+    if (audioRef.current.currentTime >= segmentEndRef.current) {
+      audioRef.current.pause();
+      audioRef.current.currentTime = segmentEndRef.current;
+      segmentEndRef.current = null;
+      setActiveSegmentId(null);
+    }
+  };
+
+  const handlePlaySentence = (item: FeedbackItem) => {
+    if (!audioRef.current || !result.audioUrl) return;
+    if (typeof item.audioStart !== 'number' || typeof item.audioEnd !== 'number') return;
+    segmentEndRef.current = item.audioEnd;
+    setActiveSegmentId(item.id);
+    audioRef.current.currentTime = Math.max(0, item.audioStart);
+    audioRef.current
+      .play()
+      .catch(() => {
+        segmentEndRef.current = null;
+        setActiveSegmentId(null);
+      });
+  };
 
   return (
     <div className="space-y-8">
@@ -62,6 +95,7 @@ const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbac
                     onPlay={handleAudioPlay}
                     onPause={handleAudioPause}
                     onEnded={handleAudioEnded}
+                    onTimeUpdate={handleAudioTimeUpdate}
                   />
                 </div>
                 <a
@@ -159,7 +193,20 @@ const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbac
                     <div className="space-y-1 flex-1">
                        <div className="flex items-start gap-2">
                          <span className="bg-red-100 text-red-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-1">ORIGINAL</span>
-                         <p className="text-slate-600 line-through decoration-red-300">{item.original}</p>
+                         <p className="text-slate-600 line-through decoration-red-300 flex-1">{item.original}</p>
+                         {result.audioUrl && typeof item.audioStart === 'number' && typeof item.audioEnd === 'number' && (
+                           <button
+                             onClick={() => handlePlaySentence(item)}
+                             className={`flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded-full border transition-colors ${
+                               activeSegmentId === item.id
+                                 ? 'border-indigo-300 bg-indigo-50 text-indigo-600'
+                                 : 'border-slate-200 text-slate-500 hover:border-indigo-200 hover:text-indigo-600'
+                             }`}
+                           >
+                             <PlayCircle className="w-4 h-4" />
+                             听此句
+                           </button>
+                         )}
                        </div>
                        <div className="flex items-start gap-2">
                          <span className="bg-green-100 text-green-700 text-[10px] font-bold px-1.5 py-0.5 rounded mt-1">BETTER</span>
@@ -167,7 +214,7 @@ const FeedbackDisplay: React.FC<Props> = ({ result, onSaveFeedback, savedFeedbac
                        </div>
                     </div>
                     <button
-                      onClick={() => onSaveFeedback(item)}
+                      onClick={() => { void onSaveFeedback(item); }}
                       className={`ml-4 p-2 rounded-full transition-colors ${isSaved ? 'bg-orange-100 text-orange-600' : 'text-slate-300 hover:bg-slate-50 hover:text-slate-500'}`}
                       title="Save for review"
                     >

@@ -228,11 +228,7 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
         } else if (activeTab === 'feedback' && selectedFeedbackIds.size > 0) {
           const selectedFeedbacks = feedbackItems.filter(f => selectedFeedbackIds.has(f.data.id));
           const result = await batchAddFeedbackToAnki(
-            selectedFeedbacks.map(f => ({
-              original: f.data.original,
-              improved: f.data.improved,
-              explanation: f.data.explanation
-            })),
+            selectedFeedbacks.map(f => f.data),
             ankiConfig
           );
           if (result.failed > 0 || result.errors.length > 0) {
@@ -672,6 +668,16 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                             <div className="space-y-1">
                               <span className="text-[11px] font-bold uppercase tracking-wide text-red-400">Original</span>
                               <p className="bg-red-50 border border-red-100 rounded-lg p-2 text-sm text-red-900">{f.original}</p>
+                              {f.audioClipUrl && (
+                                <audio
+                                  controls
+                                  src={f.audioClipUrl}
+                                  className="mt-2 w-full max-w-xs rounded-lg border border-slate-200"
+                                  preload="metadata"
+                                >
+                                  您的浏览器不支持音频播放。
+                                </audio>
+                              )}
                             </div>
                           </td>
                           <td className="px-4 py-3 text-green-700">
@@ -705,10 +711,10 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                           <td className="px-4 py-3 text-slate-500">{formatDate(item.timestamp)}</td>
                           <td className="px-4 py-3">
                             <div className="flex items-center gap-2">
-                              <button 
-                                onClick={(e) => { 
+                                <button 
+                                  onClick={(e) => { 
                                   e.stopPropagation(); 
-                                  openAnkiModal({ type: 'feedback', item: { original: f.original, improved: f.improved, explanation: f.explanation } }, false);
+                                  openAnkiModal({ type: 'feedback', item: f }, false);
                                 }}
                                 className="inline-flex items-center justify-center w-8 h-8 rounded-full border border-green-200 text-green-600 hover:bg-green-50 transition-colors"
                                 title="Add to Anki"

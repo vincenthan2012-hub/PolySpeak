@@ -10,6 +10,7 @@ import FeedbackDisplay from './components/FeedbackDisplay';
 import ReviewDashboard from './components/ReviewDashboard';
 import { useSpeechPlayback } from './hooks/useSpeechPlayback';
 import StructureOutline from './components/StructureOutline';
+import { clipAudioSegmentFromDataUrl } from './services/audioService';
 
 enum View {
   PRACTICE = 'practice',
@@ -359,10 +360,34 @@ function App() {
     });
   };
 
-  const saveFeedback = (item: FeedbackItem) => {
+  const saveFeedback = async (item: FeedbackItem) => {
+    let enrichedItem = item;
+    const hasAudioSegment = analysisResult?.audioUrl &&
+      typeof item.audioStart === 'number' &&
+      typeof item.audioEnd === 'number' &&
+      item.audioEnd > item.audioStart;
+
+    if (hasAudioSegment && analysisResult?.audioUrl) {
+      try {
+        const clip = await clipAudioSegmentFromDataUrl(
+          analysisResult.audioUrl,
+          item.audioStart!,
+          item.audioEnd!
+        );
+        enrichedItem = {
+          ...item,
+          audioClipUrl: clip.dataUrl,
+          audioClipMimeType: clip.mimeType,
+          audioClipDuration: clip.duration
+        };
+      } catch (error) {
+        console.warn('Failed to clip audio segment for feedback favorite:', error);
+      }
+    }
+
     setSavedItems(prev => {
-      if (prev.some(i => i.type === 'feedback' && (i.data as FeedbackItem).id === item.id)) return prev;
-      return [...prev, { type: 'feedback', data: item, timestamp: Date.now() }];
+      if (prev.some(i => i.type === 'feedback' && (i.data as FeedbackItem).id === enrichedItem.id)) return prev;
+      return [...prev, { type: 'feedback', data: enrichedItem, timestamp: Date.now() }];
     });
   };
 

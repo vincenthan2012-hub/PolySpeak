@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { GraphicData, Expression, AnalysisResult, LLMConfig, WhisperConfig, Difficulty } from "../types";
+import { GraphicData, Expression, AnalysisResult, LLMConfig, WhisperConfig, Difficulty, WhisperSegment } from "../types";
 import { transcribeAudio } from "./whisperService";
 
 // Default config if none provided
@@ -91,6 +91,82 @@ const splitTranscriptionIntoSentences = (transcription: string): string[] => {
     .filter(Boolean);
 };
 
+type SentenceReference = {
+  original: string;
+  normalized: string;
+  start?: number;
+  end?: number;
+};
+
+const SENTENCE_END_REGEX = /[.!?。！？…]+['")\]]*$/;
+
+const mergeSegmentsIntoSentences = (segments: WhisperSegment[]): SentenceReference[] => {
+  if (!segments?.length) return [];
+  const merged: SentenceReference[] = [];
+  let bufferText = '';
+  let bufferStart: number | undefined;
+  let lastEnd: number | undefined;
+
+  segments.forEach((segment, index) => {
+    const text = (segment.text || '').trim();
+    if (!text) return;
+
+    const start = typeof segment.start === 'number' ? segment.start : lastEnd;
+    const end = typeof segment.end === 'number' ? segment.end : start;
+
+    if (!bufferText) {
+      bufferText = text;
+      bufferStart = start;
+    } else {
+      bufferText = `${bufferText} ${text}`.replace(/\s+/g, ' ');
+    }
+    lastEnd = end;
+
+    const reachedBoundary = SENTENCE_END_REGEX.test(text);
+    const exceededLength = bufferText.length >= 200;
+    const isLastSegment = index === segments.length - 1;
+
+    if (reachedBoundary || exceededLength || isLastSegment) {
+      const cleaned = bufferText.trim();
+      if (cleaned) {
+        merged.push({
+          original: cleaned,
+          normalized: normalizeSentence(cleaned),
+          start: bufferStart,
+          end
+        });
+      }
+      bufferText = '';
+      bufferStart = undefined;
+    }
+  });
+
+  return merged;
+};
+
+const buildSentenceReferences = (transcription: string, segments?: WhisperSegment[]): SentenceReference[] => {
+  const sentences = splitTranscriptionIntoSentences(transcription).map(sentence => ({
+    original: sentence,
+    normalized: normalizeSentence(sentence)
+  }));
+
+  if (!sentences.length) return [];
+  if (!segments?.length) return sentences;
+
+  const mergedSegments = mergeSegmentsIntoSentences(segments);
+  if (!mergedSegments.length) return sentences;
+
+  return sentences.map(sentence => {
+    const match = findBestSentenceMatch(sentence.normalized, mergedSegments);
+    if (!match) return sentence;
+    return {
+      ...sentence,
+      start: match.start,
+      end: match.end
+    };
+  });
+};
+
 const countWords = (text: string) => (text.match(/\b\w+\b/g) || []).length;
 
 const ensureSentenceEnding = (text: string, fallback: string) => {
@@ -128,10 +204,10 @@ const computeTokenOverlap = (a: string, b: string) => {
   return overlap / Math.min(aTokens.size, bTokens.size);
 };
 
-const findBestSentenceMatch = (
+const findBestSentenceMatch = <T extends { original: string; normalized: string }>(
   fragmentNormalized: string,
-  sentences: Array<{ original: string; normalized: string }>
-) => {
+  sentences: T[]
+): T | null => {
   if (!fragmentNormalized) return null;
 
   const direct = sentences.find(sentence =>
@@ -144,7 +220,7 @@ const findBestSentenceMatch = (
   );
   if (reverse) return reverse;
 
-  let bestMatch: { original: string; normalized: string } | null = null;
+  let bestMatch: T | null = null;
   let bestScore = 0;
 
   sentences.forEach(sentence => {
@@ -219,30 +295,38 @@ const consolidateFeedbackBySentence = (feedbackItems: any[]) => {
       .join('\n');
   };
 
+  const resolveTiming = (items: any[]) => {
+    for (const item of items) {
+      if (typeof item?.audioStart === 'number' && typeof item?.audioEnd === 'number') {
+        return {
+          audioStart: item.audioStart,
+          audioEnd: item.audioEnd
+        };
+      }
+    }
+    return {};
+  };
+
   const consolidated: any[] = [];
   grouped.forEach((items, sentence) => {
     const bestImproved = selectBestImproved(items) || sentence;
+    const timing = resolveTiming(items);
     consolidated.push({
       ...items[0],
       id: crypto.randomUUID(),
       original: sentence,
       improved: bestImproved,
-      explanation: buildExplanation(items)
+      explanation: buildExplanation(items),
+      audioStart: timing.audioStart ?? items[0].audioStart,
+      audioEnd: timing.audioEnd ?? items[0].audioEnd
     });
   });
 
   return consolidated;
 };
 
-const mapFragmentsToFullSentences = (feedbackItems: any[], transcription: string) => {
-  if (!transcription) return feedbackItems;
-  const sentences = splitTranscriptionIntoSentences(transcription);
-  if (!sentences.length) return feedbackItems;
-
-  const normalizedSentences = sentences.map(sentence => ({
-    original: sentence,
-    normalized: normalizeSentence(sentence)
-  }));
+const mapFragmentsToFullSentences = (feedbackItems: any[], sentenceReferences: SentenceReference[]) => {
+  if (!sentenceReferences?.length) return feedbackItems;
 
   const resolvedItems = feedbackItems.map(item => {
     if (!item) return item;
@@ -250,7 +334,7 @@ const mapFragmentsToFullSentences = (feedbackItems: any[], transcription: string
     const fragmentImproved = item.improved || '';
     const fragmentNormalized = normalizeSentence(fragmentOriginal);
 
-    const match = findBestSentenceMatch(fragmentNormalized, normalizedSentences);
+    const match = findBestSentenceMatch(fragmentNormalized, sentenceReferences);
     if (!match) {
       const improvedSentence = buildImprovedSentence(fragmentOriginal, fragmentOriginal, fragmentImproved);
       return {
@@ -266,11 +350,15 @@ const mapFragmentsToFullSentences = (feedbackItems: any[], transcription: string
       fragmentImproved
     );
 
-    return {
+    const resolved = {
       ...item,
       original: match.original,
-      improved: improvedSentence
+      improved: improvedSentence,
+      audioStart: typeof match.start === 'number' ? match.start : item.audioStart,
+      audioEnd: typeof match.end === 'number' ? match.end : item.audioEnd
     };
+
+    return resolved;
   }).filter(item => item?.original?.trim());
 
   return consolidateFeedbackBySentence(resolvedItems);
@@ -741,12 +829,14 @@ export const analyzeAudio = async (
   promptTemplate: string = DEFAULT_PROMPT_TEMPLATES.feedback
 ): Promise<AnalysisResult> => {
   // Step 1: Transcribe audio using Whisper
-  let transcription: string;
+  let transcriptionResult: { text: string; segments: WhisperSegment[] } = { text: '', segments: [] };
+  let transcription = '';
   try {
     if (!whisperConfig.enabled) {
       throw new Error('Whisper is not enabled. Please enable Whisper in settings.');
     }
-    transcription = await transcribeAudio(audioBase64, whisperConfig);
+    transcriptionResult = await transcribeAudio(audioBase64, whisperConfig);
+    transcription = transcriptionResult.text || '';
     console.log('Whisper transcription:', transcription);
   } catch (error) {
     console.error('Whisper transcription error:', error);
@@ -846,10 +936,13 @@ export const analyzeAudio = async (
       data.transcription = transcription;
     }
     
+    // Build sentence references with timing info
+    const sentenceReferences = buildSentenceReferences(transcription, transcriptionResult.segments);
+
     // Add IDs to feedback items
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let feedback = (data.feedback || []).map((f: any) => ({...f, id: crypto.randomUUID()}));
-    feedback = mapFragmentsToFullSentences(feedback, transcription);
+    feedback = mapFragmentsToFullSentences(feedback, sentenceReferences);
     
     // Validate and extract overallFeedback
     const overallFeedback = data.overallFeedback ? {
@@ -864,7 +957,13 @@ export const analyzeAudio = async (
       transcription: data.transcription || transcription,
       improvedText: data.improvedText || transcription,
       feedback,
-      overallFeedback
+      overallFeedback,
+      sentenceTimings: sentenceReferences.map(ref => ({
+        text: ref.original,
+        start: ref.start,
+        end: ref.end
+      })),
+      transcriptionSegments: transcriptionResult.segments
     };
 
   } catch (error) {

@@ -1,9 +1,37 @@
+import { FeedbackItem } from '../types';
+
 /**
  * Anki Connect Service
  * Handles communication with Anki via AnkiConnect plugin
  */
 
 const ANKI_CONNECT_URL = 'http://127.0.0.1:8765';
+
+const guessAudioExtension = (mime?: string): string => {
+  if (!mime) return 'wav';
+  if (mime.includes('mp3') || mime.includes('mpeg')) return 'mp3';
+  if (mime.includes('ogg')) return 'ogg';
+  if (mime.includes('webm')) return 'webm';
+  if (mime.includes('wav')) return 'wav';
+  return 'wav';
+};
+
+const persistFeedbackAudioClip = async (feedback: FeedbackItem): Promise<string | undefined> => {
+  if (!feedback.audioClipUrl) return undefined;
+  try {
+    const base64Data = feedback.audioClipUrl.includes(',')
+      ? feedback.audioClipUrl.split(',')[1]
+      : feedback.audioClipUrl;
+    if (!base64Data) return undefined;
+    const ext = guessAudioExtension(feedback.audioClipMimeType || feedback.audioClipUrl.split(';')[0]?.split(':')[1]);
+    const filename = `polyspeak_feedback_${feedback.id}_${Date.now()}.${ext}`;
+    await storeMediaFile(filename, base64Data);
+    return filename;
+  } catch (error) {
+    console.warn('Failed to persist audio clip to Anki media:', error);
+    return undefined;
+  }
+};
 
 export interface AnkiConfig {
   deckName: string;
@@ -330,10 +358,16 @@ const escapeHtml = (text: string): string => {
  * Format feedback card for Anki
  */
 export const formatFeedbackCard = (
-  feedback: { original: string; improved: string; explanation: string }
+  feedback: { original: string; improved: string; explanation: string },
+  audioFileName?: string
 ): { Front: string; Improved: string; Back: string } => {
+  const escapedOriginal = escapeHtml(feedback.original);
+  const audioMarkup = audioFileName
+    ? `<div style="margin-top:12px;font-size:12px;color:#475569;">🎧 听录音<br>[sound:${audioFileName}]</div>`
+    : '';
+
   return {
-    Front: escapeHtml(feedback.original),
+    Front: `${escapedOriginal}${audioMarkup}`,
     Improved: escapeHtml(feedback.improved),
     Back: escapeHtml(feedback.explanation)
   };
@@ -373,13 +407,14 @@ export const addExpressionToAnki = async (
  * Add feedback to Anki
  */
 export const addFeedbackToAnki = async (
-  feedback: { original: string; improved: string; explanation: string },
+  feedback: FeedbackItem,
   config: AnkiConfig
 ): Promise<number | null> => {
   await ensureDeck(config.deckName);
   const modelName = await ensureFeedbackModel();
   
-  const fields = formatFeedbackCard(feedback);
+  const audioFileName = await persistFeedbackAudioClip(feedback);
+  const fields = formatFeedbackCard(feedback, audioFileName);
   
   const note: AnkiNote = {
     deckName: config.deckName,
@@ -451,7 +486,7 @@ export const batchAddExpressionsToAnki = async (
  * Batch add feedback to Anki
  */
 export const batchAddFeedbackToAnki = async (
-  feedbacks: Array<{ original: string; improved: string; explanation: string }>,
+  feedbacks: FeedbackItem[],
   config: AnkiConfig
 ): Promise<{ success: number; failed: number; errors: string[] }> => {
   await ensureDeck(config.deckName);
@@ -463,7 +498,8 @@ export const batchAddFeedbackToAnki = async (
 
   for (const fb of feedbacks) {
     try {
-      const fields = formatFeedbackCard(fb);
+      const audioFileName = await persistFeedbackAudioClip(fb);
+      const fields = formatFeedbackCard(fb, audioFileName);
       const note: AnkiNote = {
         deckName: config.deckName,
         modelName: modelName,
