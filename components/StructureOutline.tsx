@@ -1,20 +1,41 @@
 import React from 'react';
 import { GraphicData, GraphicType } from '../types';
 
+interface Subpoint {
+  text: string;
+  details?: string[];
+}
+
 interface OutlineSection {
   title: string;
-  points: string[];
+  points: Subpoint[];
 }
 
 interface Props {
   data: GraphicData;
 }
 
-const sanitizePoints = (items: unknown): string[] => {
+const sanitizePoints = (items: unknown): Subpoint[] => {
   if (!Array.isArray(items)) return [];
   return items
-    .map(item => (typeof item === 'string' ? item.trim() : ''))
-    .filter(Boolean);
+    .map(item => {
+      // New format: object with text and details
+      if (typeof item === 'object' && item !== null && 'text' in item) {
+        const text = typeof item.text === 'string' ? item.text.trim() : '';
+        if (!text) return null;
+        const details = Array.isArray(item.details) 
+          ? item.details.map((d: any) => typeof d === 'string' ? d.trim() : '').filter(Boolean)
+          : [];
+        return { text, details };
+      }
+      // Old format: just a string (backward compatibility)
+      if (typeof item === 'string') {
+        const trimmed = item.trim();
+        return trimmed ? { text: trimmed, details: [] } : null;
+      }
+      return null;
+    })
+    .filter((item): item is Subpoint => item !== null);
 };
 
 const buildSections = (data: GraphicData): OutlineSection[] => {
@@ -107,25 +128,35 @@ const StructureOutline: React.FC<Props> = ({ data }) => {
           key={`${section.title}-${index}`}
           className="relative bg-white border border-slate-100 rounded-2xl p-5 shadow-sm"
         >
-          <div className="absolute -top-3 left-4">
-            <span className="text-[11px] font-bold uppercase tracking-wider px-2 py-1 rounded-full bg-indigo-50 text-indigo-600 border border-indigo-100">
-              Section {index + 1}
-            </span>
-          </div>
           <div className="flex items-center gap-2 mb-3">
             <div className="w-1 h-6 rounded-full bg-indigo-400"></div>
             <p className="text-lg font-bold text-slate-800">{section.title}</p>
           </div>
-          <ul className="space-y-2">
+          <ul className="space-y-3">
             {section.points.map((point, pointIndex) => (
               <li
                 key={`${section.title}-${pointIndex}`}
                 className="flex items-start gap-2 text-sm text-slate-700"
               >
-                <span className="mt-1 inline-flex w-2 h-2 rounded-full bg-indigo-300"></span>
-                <span className="flex-1 bg-slate-50/80 rounded-lg px-3 py-2 border border-slate-100 shadow-inner">
-                  {point}
-                </span>
+                <span className="mt-1 inline-flex w-2 h-2 rounded-full bg-indigo-300 flex-shrink-0"></span>
+                <div className="flex-1 space-y-2">
+                  <div className="bg-slate-50/80 rounded-lg px-3 py-2 border border-slate-100 shadow-inner">
+                    {point.text}
+                  </div>
+                  {point.details && point.details.length > 0 && (
+                    <ul className="ml-4 space-y-1">
+                      {point.details.map((detail, detailIndex) => (
+                        <li
+                          key={`${section.title}-${pointIndex}-${detailIndex}`}
+                          className="text-xs text-slate-600 flex items-start gap-2"
+                        >
+                          <span className="mt-1.5 inline-flex w-1.5 h-1.5 rounded-full bg-indigo-200 flex-shrink-0"></span>
+                          <span className="flex-1">{detail}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               </li>
             ))}
           </ul>

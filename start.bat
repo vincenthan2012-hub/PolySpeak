@@ -19,27 +19,94 @@ REM Check if Node.js is installed
 echo [1/5] Checking Node.js...
 where node >nul 2>nul
 if errorlevel 1 (
-    echo [ERROR] Node.js is not installed or not in PATH.
-    echo Please install Node.js from https://nodejs.org/
+    echo [INFO] Node.js is not installed. Attempting to install automatically...
+    echo.
+    
+    REM Try to install using winget (Windows Package Manager)
+    where winget >nul 2>nul
+    if not errorlevel 1 (
+        echo [INFO] Using winget to install Node.js...
+        echo This may take a few minutes...
+        winget install OpenJS.NodeJS.LTS --silent --accept-package-agreements --accept-source-agreements
+        if errorlevel 1 (
+            echo [WARNING] winget installation failed. Trying alternative method...
+            goto :try_choco
+        )
+        echo [INFO] Node.js installation completed. Refreshing PATH...
+        REM Refresh PATH by restarting the script
+        call refreshenv >nul 2>nul
+        REM Wait a moment for PATH to update
+        timeout /t 2 /nobreak >nul
+        REM Check again
+        where node >nul 2>nul
+        if errorlevel 1 (
+            echo [WARNING] Node.js installed but not found in PATH.
+            echo Please restart your terminal or add Node.js to PATH manually.
+            echo You can also install manually from: https://nodejs.org/
+            echo.
+            goto :error_exit
+        )
+        echo [OK] Node.js installed successfully!
+        goto :node_found
+    )
+    
+    :try_choco
+    REM Try to install using Chocolatey
+    where choco >nul 2>nul
+    if not errorlevel 1 (
+        echo [INFO] Using Chocolatey to install Node.js...
+        echo This may take a few minutes...
+        choco install nodejs-lts -y
+        if errorlevel 1 (
+            echo [WARNING] Chocolatey installation failed.
+            goto :manual_install
+        )
+        REM Refresh PATH
+        call refreshenv >nul 2>nul
+        timeout /t 2 /nobreak >nul
+        where node >nul 2>nul
+        if errorlevel 1 (
+            echo [WARNING] Node.js installed but not found in PATH.
+            echo Please restart your terminal or add Node.js to PATH manually.
+            echo.
+            goto :error_exit
+        )
+        echo [OK] Node.js installed successfully!
+        goto :node_found
+    )
+    
+    :manual_install
+    echo [ERROR] Automatic installation failed.
+    echo.
+    echo Please install Node.js manually:
+    echo   1. Visit https://nodejs.org/
+    echo   2. Download the LTS version for Windows
+    echo   3. Run the installer
+    echo   4. Restart this script after installation
+    echo.
+    echo Alternatively, you can install a package manager:
+    echo   - winget: Usually pre-installed on Windows 10/11
+    echo   - Chocolatey: Install from https://chocolatey.org/
     echo.
     goto :error_exit
 )
+
+:node_found
 for /f "tokens=*" %%i in ('node --version 2^>nul') do set NODE_VERSION=%%i
-echo %NODE_VERSION%
-echo [OK] Node.js found
+echo [OK] Node.js found: %NODE_VERSION%
 echo.
 
-REM Check if npm is installed
+REM Check if npm is installed (usually comes with Node.js)
 echo [2/5] Checking npm...
 where npm >nul 2>nul
 if errorlevel 1 (
     echo [ERROR] npm is not installed or not in PATH.
+    echo npm should come with Node.js. Please reinstall Node.js.
     echo.
     goto :error_exit
 )
 for /f "tokens=*" %%i in ('npm --version 2^>nul') do set NPM_VERSION=%%i
-echo %NPM_VERSION%
-echo [OK] npm found
+echo [OK] npm found: %NPM_VERSION%
 echo.
 
 REM Check if package.json exists

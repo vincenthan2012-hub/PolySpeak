@@ -64,7 +64,16 @@ const ForeignText = ({ x, y, width, height, children, className = '' }: ForeignT
   </foreignObject>
 );
 
-const ListItems = ({ items, align = 'left', theme = 'indigo' }: { items: string[], align?: 'left' | 'center' | 'right', theme?: 'indigo' | 'rose' | 'blue' | 'slate' }) => {
+// Helper to extract text from item (supports both old string format and new object format)
+const extractItemText = (item: any): string => {
+  if (typeof item === 'string') return item;
+  if (typeof item === 'object' && item !== null && 'text' in item) {
+    return typeof item.text === 'string' ? item.text : '';
+  }
+  return '';
+};
+
+const ListItems = ({ items, align = 'left', theme = 'indigo' }: { items: (string | { text: string; details?: string[] })[], align?: 'left' | 'center' | 'right', theme?: 'indigo' | 'rose' | 'blue' | 'slate' }) => {
   const colors = {
     indigo: "bg-indigo-50/90 border-indigo-100 text-indigo-800",
     rose: "bg-rose-50/90 border-rose-100 text-rose-800",
@@ -72,14 +81,42 @@ const ListItems = ({ items, align = 'left', theme = 'indigo' }: { items: string[
     slate: "bg-slate-50/90 border-slate-100 text-slate-700"
   };
 
+  const detailColors = {
+    indigo: "bg-indigo-100/60 border-indigo-200 text-indigo-700",
+    rose: "bg-rose-100/60 border-rose-200 text-rose-700",
+    blue: "bg-blue-100/60 border-blue-200 text-blue-700",
+    slate: "bg-slate-100/60 border-slate-200 text-slate-600"
+  };
+
   return (
-    <ul className={`flex flex-wrap content-start gap-1.5 w-full ${align === 'center' ? 'justify-center' : align === 'right' ? 'justify-end' : 'justify-start'}`}>
-      {items?.map((item, i) => (
-        <li key={i} className={`text-[11px] font-medium px-2 py-1 rounded-md border shadow-sm leading-tight backdrop-blur-sm ${colors[theme]}`}>
-          {item}
-        </li>
-      ))}
-    </ul>
+    <div className={`flex flex-col gap-1.5 w-full ${align === 'center' ? 'items-center' : align === 'right' ? 'items-end' : 'items-start'}`}>
+      {items?.map((item, i) => {
+        const text = extractItemText(item);
+        if (!text) return null;
+        
+        // Extract details if item is an object
+        const details = typeof item === 'object' && item !== null && 'details' in item && Array.isArray(item.details) 
+          ? item.details.filter((d: any) => d && typeof d === 'string' && d.trim().length > 0)
+          : [];
+        
+        return (
+          <div key={i} className={`flex flex-col gap-0.5 w-full ${align === 'center' ? 'items-center' : align === 'right' ? 'items-end' : 'items-start'}`}>
+            <div className={`text-[11px] font-medium px-2 py-1 rounded-md border shadow-sm leading-tight backdrop-blur-sm ${colors[theme]}`}>
+              {text}
+            </div>
+            {details.length > 0 && (
+              <div className={`flex flex-wrap gap-1 ${align === 'center' ? 'justify-center' : align === 'right' ? 'justify-end' : 'justify-start'}`}>
+                {details.map((detail: string, j: number) => (
+                  <span key={j} className={`text-[9px] px-1.5 py-0.5 rounded border ${detailColors[theme]}`}>
+                    {detail}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
   );
 };
 
@@ -93,12 +130,12 @@ const VennDiagram = ({ content }: { content: any }) => {
   const cy = 320;
   const r = 280;
   
-  // Validate content
+  // Validate content - support both old (string) and new (object) formats
   const labelA = content.labelA || 'Topic A';
   const labelB = content.labelB || 'Topic B';
-  const setA = Array.isArray(content.setA) ? content.setA.filter((i: any) => i && typeof i === 'string') : [];
-  const setB = Array.isArray(content.setB) ? content.setB.filter((i: any) => i && typeof i === 'string') : [];
-  const intersection = Array.isArray(content.intersection) ? content.intersection.filter((i: any) => i && typeof i === 'string') : [];
+  const setA = Array.isArray(content.setA) ? content.setA.filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i !== null && 'text' in i))) : [];
+  const setB = Array.isArray(content.setB) ? content.setB.filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i !== null && 'text' in i))) : [];
+  const intersection = Array.isArray(content.intersection) ? content.intersection.filter((i: any) => i && (typeof i === 'string' || (typeof i === 'object' && i !== null && 'text' in i))) : [];
 
   return (
     <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`}>
@@ -127,17 +164,17 @@ const VennDiagram = ({ content }: { content: any }) => {
       </g>
 
       {/* Content A (Left) */}
-      <ForeignText x={cx1 - 200} y={cy - 100} width={220} height={200} className="items-center justify-center">
+      <ForeignText x={cx1 - 200} y={cy - 120} width={220} height={240} className="items-center justify-center">
         <ListItems items={setA} align="center" theme="indigo" />
       </ForeignText>
 
       {/* Content B (Right) */}
-      <ForeignText x={cx2 - 20} y={cy - 100} width={220} height={200} className="items-center justify-center">
+      <ForeignText x={cx2 - 20} y={cy - 120} width={220} height={240} className="items-center justify-center">
         <ListItems items={setB} align="center" theme="rose" />
       </ForeignText>
 
       {/* Intersection */}
-      <ForeignText x={425} y={cy - 120} width={150} height={240} className="items-center justify-center pt-8">
+      <ForeignText x={425} y={cy - 140} width={150} height={280} className="items-center justify-center pt-8">
          <div className="text-[10px] font-bold text-slate-400 uppercase mb-2 text-center tracking-widest bg-white/50 px-2 py-0.5 rounded-full">Shared</div>
          <ListItems items={intersection} align="center" theme="slate" />
       </ForeignText>
@@ -147,7 +184,12 @@ const VennDiagram = ({ content }: { content: any }) => {
 
 const LinearDiagram = ({ content }: { content: any }) => {
   const steps = Array.isArray(content.steps) && content.steps.length > 0
-    ? content.steps.filter((s: any) => s && typeof s === 'string' && s.trim().length > 0)
+    ? content.steps.filter((s: any) => {
+        if (!s) return false;
+        if (typeof s === 'string') return s.trim().length > 0;
+        if (typeof s === 'object' && 'text' in s) return typeof s.text === 'string' && s.text.trim().length > 0;
+        return false;
+      })
     : [];
   
   if (steps.length === 0) {
@@ -200,8 +242,9 @@ const LinearDiagram = ({ content }: { content: any }) => {
       {/* Background Path */}
       <path d={pathD} fill="none" stroke="url(#grad-path)" strokeWidth="6" strokeLinecap="round" strokeLinejoin="round" filter="url(#shadow-sm)" opacity="0.5" />
 
-      {steps.map((step: string, i: number) => {
+      {steps.map((step: any, i: number) => {
         const { x, y } = getPos(i);
+        const stepText = extractItemText(step);
         return (
           <g key={i}>
             {/* Node Marker */}
@@ -211,13 +254,22 @@ const LinearDiagram = ({ content }: { content: any }) => {
             </g>
             
             {/* Content Card */}
-            <ForeignText x={x - 120} y={y + 35} width={240} height={150} className="items-center">
-              <div className="relative">
+            <ForeignText x={x - 120} y={y + 35} width={240} height={180} className="items-center">
+              <div className="relative w-full">
                   {/* Little arrow pointing up */}
                   <div className="absolute -top-1.5 left-1/2 -translate-x-1/2 w-3 h-3 bg-white border-t border-l border-slate-100 transform rotate-45 z-10"></div>
                   
                   <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 text-sm text-center w-full leading-relaxed font-medium text-slate-700 relative z-0">
-                    {step}
+                    <div className="mb-2">{stepText}</div>
+                    {typeof step === 'object' && step !== null && 'details' in step && Array.isArray(step.details) && step.details.length > 0 && (
+                      <div className="flex flex-wrap gap-1 justify-center mt-2">
+                        {step.details.filter((d: any) => d && typeof d === 'string' && d.trim().length > 0).map((detail: string, j: number) => (
+                          <span key={j} className="text-[9px] px-1.5 py-0.5 rounded border bg-indigo-100/60 border-indigo-200 text-indigo-700">
+                            {detail}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
               </div>
             </ForeignText>
@@ -237,9 +289,14 @@ const CircleDiagram = ({ content }: { content: any }) => {
   const centerRadius = 100; // 中心圆半径
   const nodeRadius = 60; // 节点圆半径
   
-  // Validate and get nodes
+  // Validate and get nodes - support both old (string) and new (object) formats
   const nodes = Array.isArray(content.nodes) && content.nodes.length > 0 
-    ? content.nodes.filter((n: any) => n && typeof n === 'string' && n.trim().length > 0)
+    ? content.nodes.filter((n: any) => {
+        if (!n) return false;
+        if (typeof n === 'string') return n.trim().length > 0;
+        if (typeof n === 'object' && 'text' in n) return typeof n.text === 'string' && n.text.trim().length > 0;
+        return false;
+      })
     : [];
   
   // Debug log
@@ -274,10 +331,11 @@ const CircleDiagram = ({ content }: { content: any }) => {
 
       {/* Satellites */}
       {nodes.length > 0 ? (
-        nodes.map((node: string, i: number) => {
+        nodes.map((node: any, i: number) => {
           const angle = i * angleStep - Math.PI / 2;
           const nx = cx + radius * Math.cos(angle);
           const ny = cy + radius * Math.sin(angle);
+          const nodeText = extractItemText(node);
           
           // 计算连接线的起点和终点（从中心圆边缘到节点圆边缘）
           const lineStartX = cx + centerRadius * Math.cos(angle);
@@ -295,8 +353,19 @@ const CircleDiagram = ({ content }: { content: any }) => {
                   <circle cx={nx} cy={ny} r={nodeRadius} fill="white" stroke="#f472b6" strokeWidth="2" />
               </g>
               
-              <ForeignText x={nx - 50} y={ny - 50} width={100} height={100} className="justify-center items-center text-center">
-                <span className="text-xs font-medium text-slate-700 leading-tight">{node}</span>
+              <ForeignText x={nx - 60} y={ny - 60} width={120} height={120} className="justify-center items-center text-center">
+                <div className="flex flex-col gap-1 items-center">
+                  <span className="text-xs font-medium text-slate-700 leading-tight">{nodeText}</span>
+                  {typeof node === 'object' && node !== null && 'details' in node && Array.isArray(node.details) && node.details.length > 0 && (
+                    <div className="flex flex-wrap gap-0.5 justify-center">
+                      {node.details.filter((d: any) => d && typeof d === 'string' && d.trim().length > 0).map((detail: string, j: number) => (
+                        <span key={j} className="text-[8px] px-1 py-0.5 rounded border bg-rose-100/60 border-rose-200 text-rose-700">
+                          {detail}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </ForeignText>
             </g>
           );
@@ -316,7 +385,17 @@ const CircleDiagram = ({ content }: { content: any }) => {
 // Visual Style: Cluster / Mind Map (Replaces Fishbone)
 const FishboneDiagram = ({ content }: { content: any }) => {
   const ribs = Array.isArray(content.ribs) && content.ribs.length > 0
-    ? content.ribs.filter((r: any) => r && typeof r === 'object' && r.category && Array.isArray(r.items))
+    ? content.ribs.filter((r: any) => {
+        if (!r || typeof r !== 'object') return false;
+        if (!r.category) return false;
+        if (!Array.isArray(r.items)) return false;
+        // Filter out empty items
+        return r.items.some((item: any) => {
+          if (typeof item === 'string') return item.trim().length > 0;
+          if (typeof item === 'object' && 'text' in item) return typeof item.text === 'string' && item.text.trim().length > 0;
+          return false;
+        });
+      })
     : [];
   
   if (ribs.length === 0) {

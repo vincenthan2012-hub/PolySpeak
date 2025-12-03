@@ -1,14 +1,59 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Mic, Square, Loader2, AlertCircle, Pause, Play, X } from 'lucide-react';
 
+// Web Speech API 类型定义
+interface SpeechRecognition extends EventTarget {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start(): void;
+  stop(): void;
+  onresult: ((event: SpeechRecognitionEvent) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEvent) => void) | null;
+  onend: (() => void) | null;
+}
+
+interface SpeechRecognitionEvent extends Event {
+  resultIndex: number;
+  results: SpeechRecognitionResultList;
+}
+
+interface SpeechRecognitionErrorEvent extends Event {
+  error: string;
+}
+
+interface SpeechRecognitionResultList {
+  length: number;
+  item(index: number): SpeechRecognitionResult;
+  [index: number]: SpeechRecognitionResult;
+}
+
+interface SpeechRecognitionResult {
+  length: number;
+  item(index: number): SpeechRecognitionAlternative;
+  [index: number]: SpeechRecognitionAlternative;
+  isFinal: boolean;
+}
+
+interface SpeechRecognitionAlternative {
+  transcript: string;
+  confidence: number;
+}
+
+interface Window {
+  SpeechRecognition: new () => SpeechRecognition;
+  webkitSpeechRecognition: new () => SpeechRecognition;
+}
+
 interface Props {
   onAudioCaptured: (base64: string, mimeType: string) => void;
   isAnalyzing: boolean;
-  onStallDetected?: () => void;
+  onStallDetected?: (transcription?: string) => void;
   onSpeechResumed?: () => void;
+  targetLang?: string;
 }
 
-const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallDetected, onSpeechResumed }) => {
+const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallDetected, onSpeechResumed, targetLang = 'en-US' }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -22,6 +67,8 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
   const silenceNotifiedRef = useRef(false);
   const monitorIntervalRef = useRef<number | null>(null);
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const speechRecognitionRef = useRef<SpeechRecognition | null>(null);
+  const transcriptionRef = useRef<string>('');
 
   const preferredMimeTypeRef = useRef<string>('audio/webm');
 
@@ -53,9 +100,22 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
     }
   };
 
+  const stopTranscriptionDetection = () => {
+    if (speechRecognitionRef.current) {
+      try {
+        speechRecognitionRef.current.stop();
+      } catch {
+        // ignore
+      }
+      speechRecognitionRef.current = null;
+    }
+    transcriptionRef.current = '';
+  };
+
   useEffect(() => {
     return () => {
       stopSilenceMonitor();
+      stopTranscriptionDetection();
       streamRef.current?.getTracks().forEach(track => track.stop());
     };
   }, []);
@@ -95,9 +155,19 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
           if (silenceStartRef.current === null) {
             silenceStartRef.current = now;
           }
-          if (!silenceNotifiedRef.current && now - silenceStartRef.current > 3000) {
+          if (!silenceNotifiedRef.current && now - silenceStartRef.current > 2000) {
             silenceNotifiedRef.current = true;
-            onStallDetected?.();
+            // 获取最新的转录内容（包括最新的 interim results）
+            const currentTranscription = transcriptionRef.current.trim();
+            console.log('[AudioRecorder] Silence detected, transcription:', currentTranscription || '(empty)');
+            
+            // 只传递最近的内容（最后50个词），避免使用太旧的内容
+            const words = currentTranscription.split(/\s+/);
+            const recentWords = words.slice(Math.max(0, words.length - 50)).join(' ');
+            const recentTranscription = recentWords.trim() || currentTranscription;
+            
+            console.log('[AudioRecorder] Recent transcription (last 50 words):', recentTranscription);
+            onStallDetected?.(recentTranscription || undefined);
           }
         } else {
           silenceStartRef.current = null;
@@ -109,6 +179,84 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       }, 250);
     } catch (err) {
       console.warn('Silence monitor unavailable', err);
+    }
+  };
+
+  const startTranscriptionDetection = (stream: MediaStream) => {
+    try {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        console.warn('Speech Recognition API not available');
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = targetLang;
+
+      recognition.onresult = (event: SpeechRecognitionEvent) => {
+        // 分离 final 和 interim 结果
+        let finalTranscript = '';
+        let interimTranscript = '';
+        
+        for (let i = 0; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            // 最终结果：追加到完整转录
+            finalTranscript += transcript + ' ';
+          } else {
+            // 临时结果：用于实时显示
+            interimTranscript += transcript + ' ';
+          }
+        }
+        
+        // 更新完整转录（只使用 final results，避免重复）
+        if (finalTranscript.trim()) {
+          transcriptionRef.current += finalTranscript;
+          // 清理多余空格
+          transcriptionRef.current = transcriptionRef.current.replace(/\s+/g, ' ').trim();
+        }
+        
+        // 构建最新的完整转录（final + 最新的 interim）
+        // 这样在检测到静音时能获取到用户刚说的最新内容
+        const latestTranscript = (transcriptionRef.current + ' ' + interimTranscript).trim();
+        
+        // 更新一个临时引用，用于静音检测时获取最新内容
+        // 这个引用包含最新的 interim results
+        if (latestTranscript) {
+          // 存储最新的完整转录（包括 interim）
+          transcriptionRef.current = latestTranscript;
+        }
+        
+        // 如果检测到新的语音输入，清除hint通知标志并触发resume
+        const currentTranscript = transcriptionRef.current.trim();
+        if (currentTranscript && silenceNotifiedRef.current) {
+          silenceNotifiedRef.current = false;
+          onSpeechResumed?.();
+        }
+      };
+
+      recognition.onerror = (event: any) => {
+        console.warn('Speech recognition error:', event.error);
+      };
+
+      recognition.onend = () => {
+        // 如果还在录音且未暂停，重新启动识别
+        const shouldRestart = mediaRecorderRef.current?.state === 'recording' && streamRef.current;
+        if (shouldRestart) {
+          try {
+            recognition.start();
+          } catch {
+            // 忽略错误，可能已经在运行
+          }
+        }
+      };
+
+      recognition.start();
+      speechRecognitionRef.current = recognition;
+    } catch (err) {
+      console.warn('Transcription detection unavailable', err);
     }
   };
 
@@ -129,8 +277,11 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       streamRef.current = stream;
       setIsPaused(false);
       discardRef.current = false;
+      transcriptionRef.current = ''; // 重置转录
       stopSilenceMonitor();
+      stopTranscriptionDetection();
       startSilenceMonitor(stream);
+      startTranscriptionDetection(stream);
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data.size > 0) {
@@ -188,6 +339,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       setIsRecording(false);
       setIsPaused(false);
       stopSilenceMonitor();
+      stopTranscriptionDetection();
       onSpeechResumed?.();
     }
   };
@@ -197,6 +349,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       mediaRecorderRef.current.pause();
       setIsPaused(true);
       stopSilenceMonitor();
+      stopTranscriptionDetection();
     }
   };
 
@@ -206,6 +359,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       setIsPaused(false);
       if (streamRef.current) {
         startSilenceMonitor(streamRef.current);
+        startTranscriptionDetection(streamRef.current);
       }
       onSpeechResumed?.();
     }
@@ -219,6 +373,7 @@ const AudioRecorder: React.FC<Props> = ({ onAudioCaptured, isAnalyzing, onStallD
       setIsPaused(false);
       setError(null);
       stopSilenceMonitor();
+      stopTranscriptionDetection();
       onSpeechResumed?.();
     }
   };

@@ -112,8 +112,35 @@ You can choose from multiple AI providers:
 - **Frontend**: React + TypeScript + Vite
 - **Speech Recognition**: Whisper (via @xenova/transformers)
 - **AI Analysis**: Configurable LLM providers (Gemini, OpenAI, Ollama, etc.)
+- **Text-to-Speech**: Web Speech API with automatic fallback to Edge TTS
 - **Storage**: LocalStorage for saved items and settings
 - **Audio Format**: WebM (Opus codec) → Converted to WAV for Whisper
+
+### Text-to-Speech (TTS) Support
+
+The app uses a smart TTS system with multiple fallback layers:
+
+1. **Primary**: Web Speech API (browser's built-in TTS)
+   - Works in most modern browsers
+   - May require VPN in some regions (e.g., mainland China)
+
+2. **First Fallback**: Edge TTS (Microsoft Edge Text-to-Speech API)
+   - **Works in ANY browser** (Chrome, Firefox, Safari, Edge, etc.) - no need to use Edge browser!
+   - Automatically used when Web Speech API is unavailable
+   - Better compatibility in mainland China
+   - Supports multiple languages and voices
+   - **Note**: May have CORS restrictions in some network environments
+
+3. **Second Fallback**: Google Translate TTS
+   - Automatically used when Edge TTS fails (e.g., due to CORS)
+   - Works without CORS issues by using Audio element directly
+   - Supports multiple languages
+   - Good compatibility in most regions
+
+**Important**: 
+- Edge TTS is a web API service, not tied to Edge browser. You can use it in Chrome, Firefox, Safari, or any modern browser.
+- The app automatically tries each TTS service in order until one works.
+- If all TTS services fail, you'll see a helpful error message with suggestions.
 
 ## Troubleshooting
 
@@ -131,6 +158,17 @@ You can choose from multiple AI providers:
 - For Ollama: Ensure Ollama is running (`ollama serve`)
 - For API providers: Check your API key and network connection
 - Review browser console for specific error messages
+
+### Text-to-Speech Issues
+- **In Mainland China**: The app automatically falls back through multiple TTS services (Edge TTS → Google TTS)
+- **Browser Compatibility**: All TTS services work in any modern browser (Chrome, Firefox, Safari, Edge) - you don't need to use Edge browser
+- **CORS Errors**: If you see "Failed to fetch" errors, the app will automatically try Google TTS as a fallback
+- If TTS doesn't work: Check browser console for error messages
+- Some browsers may require user interaction before playing audio (click to enable)
+- If all TTS services fail, you may need to:
+  1. Use VPN to access TTS services
+  2. Configure a proxy server
+  3. Check your network firewall settings
 
 ## License
 

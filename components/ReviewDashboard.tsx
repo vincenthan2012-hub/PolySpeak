@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { SavedItem, Expression, FeedbackItem, LLMConfig, PromptSettings } from '../types';
 import { generateStory } from '../services/geminiService';
-import { Sparkles, BookOpen, Loader2, AlertCircle, X, Volume2, Pause, Plus, Download, Trash2 } from 'lucide-react';
+import { Sparkles, BookOpen, Loader2, AlertCircle, X, Volume2, Pause, Plus, Download, Trash2, FileText } from 'lucide-react';
 import { detectSpeechLang } from '../services/audioService';
 import { useSpeechPlayback } from '../hooks/useSpeechPlayback';
 import { 
@@ -13,6 +13,7 @@ import {
   batchAddFeedbackToAnki,
   AnkiConfig
 } from '../services/ankiService';
+import { useToast } from './ToastProvider';
 
 interface Props {
   savedItems: SavedItem[];
@@ -41,12 +42,11 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
   const [ankiDecks, setAnkiDecks] = useState<string[]>([]);
   const [pendingAnkiItem, setPendingAnkiItem] = useState<{ type: 'expression' | 'feedback'; item: any } | null>(null);
   const [isBatchMode, setIsBatchMode] = useState(false);
-  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
-  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   
   // Flashcard State
   const [currentCardIndex, setCurrentCardIndex] = useState(0);
   const [isFlipped, setIsFlipped] = useState(false);
+  const { showToast: showGlobalToast } = useToast();
 
   const expressions = savedItems
     .filter(i => i.type === 'expression')
@@ -136,20 +136,8 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
   };
 
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
-    if (toastTimerRef.current) {
-      clearTimeout(toastTimerRef.current);
-    }
-    setToast({ message, type });
-    toastTimerRef.current = setTimeout(() => setToast(null), 4000);
+    showGlobalToast(message, type === 'success' ? 'success' : 'error');
   };
-
-  useEffect(() => {
-    return () => {
-      if (toastTimerRef.current) {
-        clearTimeout(toastTimerRef.current);
-      }
-    };
-  }, []);
 
   const handlePlayback = (id: string, text: string) => {
     const lang = detectSpeechLang(text, targetLang);
@@ -181,7 +169,7 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
     try {
       const checkResult = await checkAnkiConnect();
       if (!checkResult.available) {
-        alert(`无法连接到 AnkiConnect:\n\n${checkResult.error}\n\n请确保:\n1. Anki 正在运行\n2. AnkiConnect 插件已启用\n3. 已配置 CORS 设置`);
+        showToast(`无法连接到 AnkiConnect:\n\n${checkResult.error}\n\n请确保:\n1. Anki 正在运行\n2. AnkiConnect 插件已启用\n3. 已配置 CORS 设置`, 'error');
         return;
       }
 
@@ -194,13 +182,13 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
       setIsBatchMode(batch);
       setShowAnkiModal(true);
     } catch (error) {
-      alert(`检查 AnkiConnect 连接失败: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      showToast(`检查 AnkiConnect 连接失败: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     }
   };
 
   const handleAnkiExport = async () => {
     if (!ankiConfig.deckName) {
-      alert('请选择或输入牌组名称');
+      showToast('请选择或输入牌组名称', 'error');
       return;
     }
 
@@ -220,9 +208,9 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
             ankiConfig
           );
           if (result.failed > 0 || result.errors.length > 0) {
-            alert(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+            showToast(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`, 'error');
           } else {
-            showToast(`批量导入完成！成功: ${result.success} 张卡片`);
+            showToast(`批量导入完成！成功: ${result.success} 张卡片`, 'success');
           }
           setSelectedPhraseIds(new Set());
         } else if (activeTab === 'feedback' && selectedFeedbackIds.size > 0) {
@@ -232,13 +220,13 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
             ankiConfig
           );
           if (result.failed > 0 || result.errors.length > 0) {
-            alert(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`);
+            showToast(`批量导入完成，但有部分失败。\n成功: ${result.success}\n失败: ${result.failed}${result.errors.length > 0 ? '\n\n错误:\n' + result.errors.slice(0, 5).join('\n') : ''}`, 'error');
           } else {
-            showToast(`批量导入完成！成功: ${result.success} 张卡片`);
+            showToast(`批量导入完成！成功: ${result.success} 张卡片`, 'success');
           }
           setSelectedFeedbackIds(new Set());
         } else {
-          alert('请选择要导出的项目');
+          showToast('请选择要导出的项目', 'error');
         }
       } else if (pendingAnkiItem) {
         // Single export
@@ -254,7 +242,7 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
       setShowAnkiModal(false);
       setPendingAnkiItem(null);
     } catch (error) {
-      alert(`导入失败: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      showToast(`导入失败: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error');
     } finally {
       setIsExportingToAnki(false);
     }
@@ -287,6 +275,95 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
       onDeleteSavedItems(Array.from(selectedFeedbackIds), 'feedback');
       setSelectedFeedbackIds(new Set());
     }
+  };
+
+  // CSV Export Functions
+  const escapeCSV = (text: string): string => {
+    if (!text) return '';
+    // Escape quotes and wrap in quotes if contains comma, newline, or quote
+    if (text.includes(',') || text.includes('\n') || text.includes('"')) {
+      return `"${text.replace(/"/g, '""')}"`;
+    }
+    return text;
+  };
+
+  const exportPhrasesToCSV = () => {
+    if (selectedPhraseIds.size === 0) {
+      showToast('请先选择要导出的短语', 'error');
+      return;
+    }
+
+    const selectedPhrases = expressions.filter(p => selectedPhraseIds.has(p.data.id));
+    
+    // CSV Header
+    const headers = ['Type', 'Expression', 'Explanation', 'Example', 'Date'];
+    const csvRows = [headers.join(',')];
+
+    // CSV Data
+    selectedPhrases.forEach(item => {
+      const p = item.data;
+      const row = [
+        escapeCSV(p.type),
+        escapeCSV(p.phrase),
+        escapeCSV(p.explanation),
+        escapeCSV(p.example),
+        escapeCSV(formatDate(item.timestamp))
+      ];
+      csvRows.push(row.join(','));
+    });
+
+    // Create and download CSV file
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' }); // BOM for Excel UTF-8 support
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `polyspeak-phrases-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    showToast(`已导出 ${selectedPhrases.length} 个短语到 CSV 文件`, 'success');
+  };
+
+  const exportFeedbackToCSV = () => {
+    if (selectedFeedbackIds.size === 0) {
+      showToast('请先选择要导出的反馈', 'error');
+      return;
+    }
+
+    const selectedFeedbacks = feedbackItems.filter(f => selectedFeedbackIds.has(f.data.id));
+    
+    // CSV Header
+    const headers = ['Original', 'Improved', 'Feedback', 'Date'];
+    const csvRows = [headers.join(',')];
+
+    // CSV Data
+    selectedFeedbacks.forEach(item => {
+      const f = item.data;
+      const row = [
+        escapeCSV(f.original),
+        escapeCSV(f.improved),
+        escapeCSV(f.explanation),
+        escapeCSV(formatDate(item.timestamp))
+      ];
+      csvRows.push(row.join(','));
+    });
+
+    // Create and download CSV file
+    const csvContent = csvRows.join('\n');
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8;' }); // BOM for Excel UTF-8 support
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `polyspeak-feedback-${new Date().toISOString().split('T')[0]}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+
+    showToast(`已导出 ${selectedFeedbacks.length} 个反馈到 CSV 文件`, 'success');
   };
 
   const renderStory = (text: string) => {
@@ -342,16 +419,6 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
 
   return (
     <div className="max-w-5xl mx-auto">
-      {toast && (
-        <div
-          className={`fixed bottom-6 left-1/2 -translate-x-1/2 md:left-auto md:right-8 md:translate-x-0 z-50 px-5 py-3 rounded-2xl shadow-2xl text-sm font-semibold flex items-center gap-3 ${
-            toast.type === 'success' ? 'bg-emerald-500 text-white' : 'bg-rose-500 text-white'
-          }`}
-        >
-          {toast.type === 'success' ? <Sparkles className="w-4 h-4" /> : <AlertCircle className="w-4 h-4" />}
-          {toast.message}
-        </div>
-      )}
       {!isFlashcardMode && (
         <div className="flex flex-wrap gap-2 border-b border-slate-200 mb-8 pb-1">
           {[
@@ -387,7 +454,15 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-green-600 text-white hover:bg-green-700"
                 >
                   <Download className="w-4 h-4" />
-                  Export Selected
+                  Export as Anki card
+                </button>
+                <button 
+                  onClick={exportPhrasesToCSV} 
+                  disabled={selectedPhraseIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  <FileText className="w-4 h-4" />
+                  Export as CSV
                 </button>
                 <button 
                   onClick={handleBatchDeletePhrases} 
@@ -582,7 +657,15 @@ const ReviewDashboard: React.FC<Props> = ({ savedItems, onUpdateSavedItem, onDel
                   className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-green-600 text-white hover:bg-green-700"
                 >
                   <Download className="w-4 h-4" />
-                  Export Selected
+                  Export as Anki card
+                </button>
+                <button 
+                  onClick={exportFeedbackToCSV} 
+                  disabled={selectedFeedbackIds.size === 0}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold transition-all shadow-sm disabled:opacity-40 disabled:cursor-not-allowed bg-blue-600 text-white hover:bg-blue-700"
+                >
+                  <FileText className="w-4 h-4" />
+                  Export as CSV
                 </button>
                 <button 
                   onClick={handleBatchDeleteFeedback} 

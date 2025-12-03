@@ -8,9 +8,10 @@ import ExpressionList from './components/ExpressionList';
 import AudioRecorder from './components/AudioRecorder';
 import FeedbackDisplay from './components/FeedbackDisplay';
 import ReviewDashboard from './components/ReviewDashboard';
+import { ToastProvider, useToast } from './components/ToastProvider';
 import { useSpeechPlayback } from './hooks/useSpeechPlayback';
 import StructureOutline from './components/StructureOutline';
-import { clipAudioSegmentFromDataUrl } from './services/audioService';
+// Audio clipping and逐句时间轴已不再用于单句反馈，这里仅保留整体录音播放功能
 
 enum View {
   PRACTICE = 'practice',
@@ -28,7 +29,7 @@ const PROVIDERS = [
 
 const MAX_PROMPT_HISTORY = 20;
 
-function App() {
+function AppInner() {
   // State
   const [view, setView] = useState<View>(View.PRACTICE);
   const [showSettings, setShowSettings] = useState(false);
@@ -206,6 +207,8 @@ function App() {
     savedItems.filter(i => i.type === 'feedback').map(i => (i.data as FeedbackItem).id)
   );
 
+  const { showToast } = useToast();
+
   // Helper to format error messages
   const formatError = (error: unknown): string => {
     if (error instanceof Error) {
@@ -245,7 +248,6 @@ function App() {
     setScaffoldData(null);
     setSampleSpeech(null);
     setShowSampleModal(false);
-    setAnalysisResult(null);
     try {
       const data = await generateScaffold(
         topic,
@@ -259,7 +261,7 @@ function App() {
       setScaffoldData(data);
     } catch (error) {
       console.error('Error generating scaffold:', error);
-      alert(`生成计划失败:\n\n${formatError(error)}`);
+      showToast(`生成计划失败:\n\n${formatError(error)}`, 'error');
     } finally {
       setIsLoadingScaffold(false);
     }
@@ -280,7 +282,7 @@ function App() {
         setShowSampleModal(true);
     } catch (e) {
         console.error('Error generating sample:', e);
-        alert(`生成示例失败:\n\n${formatError(e)}`);
+        showToast(`生成示例失败:\n\n${formatError(e)}`, 'error');
     } finally {
         setIsGeneratingSample(false);
     }
@@ -301,7 +303,7 @@ function App() {
       }
     } catch (error) {
       console.error('Error generating inspire prompt:', error);
-      alert(`生成话题失败:\n\n${formatError(error)}`);
+      showToast(`生成话题失败:\n\n${formatError(error)}`, 'error');
     } finally {
       setIsGeneratingPrompt(false);
     }
@@ -310,6 +312,9 @@ function App() {
   const handleAudioCaptured = async (base64: string, mimeType: string) => {
     const safeMime = mimeType || 'audio/webm';
     const dataUrl = `data:${safeMime};base64,${base64}`;
+    // 一旦进入分析阶段，清理并停止任何进行中的提示，避免给用户“还在录音/监听”的错觉
+    setLiveHint(null);
+    setIsGeneratingHint(false);
     setIsAnalyzing(true);
     try {
       // Get language code for Whisper (e.g., 'es' from 'es-ES')
@@ -322,19 +327,22 @@ function App() {
       setAnalysisResult({ ...result, audioUrl: dataUrl, audioMimeType: safeMime });
     } catch (error) {
       console.error('Error analyzing audio:', error);
-      alert(`分析失败:\n\n${formatError(error)}`);
+      showToast(`分析失败:\n\n${formatError(error)}`, 'error');
     } finally {
       setIsAnalyzing(false);
     }
   };
 
-  const handleRecordingStall = async () => {
-    if (!topic.trim() || isGeneratingHint) return;
+  const handleRecordingStall = async (transcription?: string) => {
+    // 仅在真正录音且未处于分析阶段时才生成 Hint
+    if (!topic.trim() || isGeneratingHint || isAnalyzing) return;
     const now = Date.now();
     if (now - hintCooldownRef.current < 15000) return;
     setIsGeneratingHint(true);
     try {
-      const hint = await generateLiveHint(topic, difficulty, llmConfig, promptSettings.liveHint);
+      console.log('[App] Generating hint with topic:', topic, 'transcription:', transcription || '(none)');
+      const hint = await generateLiveHint(topic, difficulty, llmConfig, promptSettings.liveHint, transcription);
+      console.log('[App] Received hint:', hint);
       setLiveHint(hint);
       hintCooldownRef.current = now;
     } catch (error) {
@@ -345,7 +353,8 @@ function App() {
   };
 
   const handleRecordingResume = () => {
-    setLiveHint(null);
+    // 用户重新开口时，不再自动清空提示框，只是停止“思考中”的状态
+    // 这样 AI Hint 文本框可以一直停留在屏幕上，直到下一次停顿时被新提示覆盖
     setIsGeneratingHint(false);
   };
 
@@ -361,33 +370,21 @@ function App() {
   };
 
   const saveFeedback = async (item: FeedbackItem) => {
-    let enrichedItem = item;
-    const hasAudioSegment = analysisResult?.audioUrl &&
-      typeof item.audioStart === 'number' &&
-      typeof item.audioEnd === 'number' &&
-      item.audioEnd > item.audioStart;
-
-    if (hasAudioSegment && analysisResult?.audioUrl) {
-      try {
-        const clip = await clipAudioSegmentFromDataUrl(
-          analysisResult.audioUrl,
-          item.audioStart!,
-          item.audioEnd!
-        );
-        enrichedItem = {
-          ...item,
-          audioClipUrl: clip.dataUrl,
-          audioClipMimeType: clip.mimeType,
-          audioClipDuration: clip.duration
-        };
-      } catch (error) {
-        console.warn('Failed to clip audio segment for feedback favorite:', error);
-      }
+    const isAlreadySaved = savedFeedbackIds.has(item.id);
+    if (isAlreadySaved) {
+      setSavedItems(prev =>
+        prev.filter(saved => {
+          if (saved.type !== 'feedback') return true;
+          const savedFeedback = saved.data as FeedbackItem;
+          return savedFeedback.id !== item.id;
+        })
+      );
+      return;
     }
 
     setSavedItems(prev => {
-      if (prev.some(i => i.type === 'feedback' && (i.data as FeedbackItem).id === enrichedItem.id)) return prev;
-      return [...prev, { type: 'feedback', data: enrichedItem, timestamp: Date.now() }];
+      if (prev.some(i => i.type === 'feedback' && (i.data as FeedbackItem).id === item.id)) return prev;
+      return [...prev, { type: 'feedback', data: item, timestamp: Date.now() }];
     });
   };
 
@@ -1112,38 +1109,40 @@ function App() {
           {/* Sticky Recorder at Bottom - Available only in Practice View */}
           {view === View.PRACTICE && (
             <div className="fixed bottom-20 md:bottom-6 left-0 right-0 z-40 flex justify-center px-4 pointer-events-none">
-               <div className="w-full max-w-xl pointer-events-auto animate-in slide-in-from-bottom-4 fade-in duration-500 space-y-3">
-                 {(isGeneratingHint || liveHint) && (
-                   <div className="flex justify-center">
-                     <div className="bg-slate-900/90 text-white px-4 py-3 rounded-2xl shadow-xl flex items-start gap-3 w-full">
-                        <div className="w-8 h-8 rounded-full bg-indigo-500/40 flex items-center justify-center mt-0.5">
-                          <Sparkles className="w-4 h-4 text-white" />
-                        </div>
-                        <div className="flex-1">
-                          <p className="text-[10px] uppercase tracking-[0.2em] text-indigo-200 font-semibold mb-1">
-                            {liveHint ? (liveHint.type === 'question' ? 'AI Question' : 'AI Hint') : 'AI Coach'}
+              <div className="w-full max-w-xl pointer-events-auto animate-in slide-in-from-bottom-4 fade-in duration-500 space-y-3">
+                {/* AI Hint 卡片：只有拿到 hint 时才显示，不展示加载中文案 */}
+                {liveHint && (
+                  <div className="flex justify-center">
+                    <div className="bg-slate-900/90 backdrop-blur-md text-white px-5 py-4 rounded-2xl shadow-xl w-full max-w-md">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-6 h-6 rounded-full bg-yellow-500/20 flex items-center justify-center">
+                            <span className="text-yellow-400 text-xs font-bold">H</span>
+                          </div>
+                          <p className="text-[10px] uppercase tracking-[0.15em] text-yellow-400 font-bold">
+                            HELPFUL HINT
                           </p>
-                          <p className="text-sm leading-snug">
-                            {liveHint ? liveHint.message : 'Thinking of the next nudge...'}
-                          </p>
                         </div>
-                        <button
-                          onClick={() => setLiveHint(null)}
-                          className="text-white/60 hover:text-white transition-colors"
-                          aria-label="Close hint"
-                        >
-                          <X className="w-4 h-4" />
-                        </button>
-                     </div>
-                   </div>
-                 )}
-                 <AudioRecorder 
-                   onAudioCaptured={handleAudioCaptured} 
-                   isAnalyzing={isAnalyzing} 
-                   onStallDetected={handleRecordingStall}
-                   onSpeechResumed={handleRecordingResume}
-                 />
-               </div>
+                      </div>
+                      <>
+                        <p className="text-[10px] uppercase tracking-[0.2em] text-indigo-200 font-semibold mb-2">
+                          {liveHint.type === 'question' ? 'AI Question' : 'AI Hint'}
+                        </p>
+                        <p className="text-sm leading-snug text-white">
+                          {liveHint.message}
+                        </p>
+                      </>
+                    </div>
+                  </div>
+                )}
+                <AudioRecorder 
+                  onAudioCaptured={handleAudioCaptured} 
+                  isAnalyzing={isAnalyzing} 
+                  onStallDetected={handleRecordingStall}
+                  onSpeechResumed={handleRecordingResume}
+                  targetLang={targetLang}
+                />
+              </div>
             </div>
           )}
         </main>
@@ -1174,6 +1173,14 @@ function App() {
         </nav>
       </div>
     </div>
+  );
+}
+
+function App() {
+  return (
+    <ToastProvider>
+      <AppInner />
+    </ToastProvider>
   );
 }
 

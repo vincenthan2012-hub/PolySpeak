@@ -8,6 +8,7 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        strictPort: true, // 如果端口被占用，报错而不是自动切换
       },
       plugins: [react()],
       define: {
